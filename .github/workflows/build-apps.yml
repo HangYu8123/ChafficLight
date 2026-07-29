@@ -1,0 +1,118 @@
+name: Build apps
+
+# PyInstaller is not a cross-compiler, so each platform's app has to be built on that
+# platform. This is the only place all three exist, and — since the project is
+# developed on Windows — the only place the macOS and Linux artifacts are ever run.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+# Read-only by default: the build jobs execute repo code and PyInstaller hooks, so the
+# token that can push to the repository is scoped to the release job alone.
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            label: windows
+            console: dist/chafficlight-cli.exe
+          - os: macos-latest
+            label: macos
+            console: dist/chafficlight-cli
+          # Not ubuntu-latest: a PyInstaller binary is forward-compatible only, so
+          # building against the oldest supported runner's glibc reaches the most
+          # distributions.
+          - os: ubuntu-22.04
+            label: linux
+            console: dist/ChafficLight
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Through the extra rather than by name, so a runtime dependency added to
+      # `dependencies` later cannot be silently absent at freeze time.
+      - name: Install build dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -e ".[build]"
+
+      # The archive is named from the package version and the release from the tag;
+      # nothing else reconciles the two.
+      - name: Check the tag matches the package version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          version=$(python -c "import cli_traffic_light; print(cli_traffic_light.__version__)")
+          test "$GITHUB_REF_NAME" = "v$version" \
+            || { echo "tag $GITHUB_REF_NAME does not match version $version"; exit 1; }
+
+      - name: Build
+        run: python tools/build_app.py
+
+      # The point of building on the real platform is to run what was produced.
+      # --once --json never constructs a Tk root, so it needs no display.
+      - name: Smoke test the frozen binary
+        shell: bash
+        run: |
+          output=$("${{ matrix.console }}" --once --json)
+          echo "$output" | python -c "import json,sys; json.load(sys.stdin)"
+
+      # The launcher and login paths are the code that cannot be executed on the
+      # development machine, so this is the only evidence they work at all. Pointed at
+      # a scratch HOME so the runner's own configuration is untouched.
+      - name: Exercise the launcher and login entries (Linux)
+        if: matrix.label == 'linux'
+        run: |
+          export XDG_CONFIG_HOME="$RUNNER_TEMP/config"
+          export XDG_DATA_HOME="$RUNNER_TEMP/data"
+          dist/ChafficLight --install-desktop --enable-autostart
+          test -f "$XDG_DATA_HOME/applications/chafficlight.desktop"
+          test -f "$XDG_CONFIG_HOME/autostart/chafficlight.desktop"
+          dist/ChafficLight --uninstall-desktop --disable-autostart
+          test ! -e "$XDG_DATA_HOME/applications/chafficlight.desktop"
+          test ! -e "$XDG_CONFIG_HOME/autostart/chafficlight.desktop"
+
+      - name: Exercise the login agent (macOS)
+        if: matrix.label == 'macos'
+        run: |
+          dist/chafficlight-cli --enable-autostart
+          plist=~/Library/LaunchAgents/io.github.hangyu8123.chafficlight.plist
+          plutil -lint "$plist"
+          # launchd execs this path, so it must name a file that exists.
+          test -x "$(plutil -extract ProgramArguments.0 raw -o - "$plist")"
+          dist/chafficlight-cli --disable-autostart
+          test ! -e "$plist"
+
+      - name: Run the test suite against the built tree
+        run: python -m pip install -e ".[test]" && python -m pytest tests/ -q
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ChafficLight-${{ matrix.label }}
+          # Already a tar.gz or zip: upload-artifact does not preserve the executable
+          # bit, so the payload has to carry its own permissions.
+          path: dist/ChafficLight-*
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/ChafficLight-*

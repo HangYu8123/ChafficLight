@@ -103,14 +103,49 @@ def test_tokens_per_second_is_not_last_minus_first():
     assert rate != pytest.approx((900 - 1_000) / 20.0)
 
 
-def test_tokens_per_second_ignores_samples_older_than_the_window():
+def test_tokens_per_second_divides_by_the_whole_window_not_the_sample_span():
+    """A pre-window sample is a baseline for the step that lands in the window.
+
+    The step onto 100 was *reported* at NOW-30, inside the window, so its tokens
+    count even though the sample it is measured against has aged out. Both steps
+    are then spread over the full 60 s, not over the 20 s their two timestamps
+    happen to span.
+    """
     samples = [(NOW - 120.0, 0), (NOW - 30.0, 100), (NOW - 10.0, 400)]
-    assert tokens_per_second(samples, NOW) == pytest.approx(15.0)
+    assert tokens_per_second(samples, NOW) == pytest.approx(400.0 / 60.0)
 
 
-def test_tokens_per_second_widening_the_window_pulls_the_old_sample_back_in():
+def test_tokens_per_second_widening_the_window_lengthens_the_divisor():
+    """Same tokens, longer window: the rate falls because more idle time counts."""
     samples = [(NOW - 120.0, 0), (NOW - 30.0, 100), (NOW - 10.0, 400)]
-    assert tokens_per_second(samples, NOW, window=300) == pytest.approx(400.0 / 110.0)
+    assert tokens_per_second(samples, NOW, window=300) == pytest.approx(400.0 / 120.0)
+
+
+def test_tokens_per_second_decays_as_a_finished_burst_recedes():
+    """The bug this guards: a burst held its peak rate until it aged out.
+
+    All the tokens arrive in one 2 s burst, which is then over. Dividing by the
+    burst's own span reports the speed it was produced at — 2,500 tok/s — no
+    matter how long ago it stopped, so an idle session reads as the busiest one
+    on the face. The rate must fall as the silence after it grows.
+    """
+    burst = [(NOW - 50.0, 0), (NOW - 48.0, 5_000)]
+    just_over = tokens_per_second(burst, NOW - 47.0)
+    long_over = tokens_per_second(burst, NOW)
+    assert just_over == pytest.approx(5_000.0 / 3.0)
+    assert long_over == pytest.approx(5_000.0 / 50.0)
+    assert long_over < just_over
+
+
+def test_tokens_per_second_counts_silence_since_the_last_sample():
+    """Two sessions that burned the same tokens differ by how long ago they stopped."""
+    still_going = [(NOW - 30.0, 0), (NOW - 1.0, 3_000)]
+    stopped = [(NOW - 30.0, 0), (NOW - 25.0, 3_000)]
+    assert tokens_per_second(still_going, NOW) == pytest.approx(100.0)
+    assert tokens_per_second(stopped, NOW) == pytest.approx(100.0)
+    # Same divisor — both opened at NOW-30 — so the *totals* match, and it is the
+    # continuing silence that separates them as it lengthens.
+    assert tokens_per_second(stopped, NOW + 30.0) == pytest.approx(3_000.0 / 60.0)
 
 
 @pytest.mark.parametrize(

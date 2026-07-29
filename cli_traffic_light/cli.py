@@ -60,6 +60,15 @@ def _print_once(monitor: Monitor, as_json: bool) -> None:
         )
 
 
+def _report(paths: list, *, removed: bool, nothing: str) -> None:
+    """Say which files a launcher command touched, or that it touched none."""
+    verb = "removed" if removed else "created"
+    for path in paths:
+        print(f"{verb} {path}")
+    if not paths:
+        print(nothing)
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the monitor.
 
@@ -67,7 +76,7 @@ def main(argv: list[str] | None = None) -> int:
     returns without ever constructing a Tk root; otherwise it opens the window.
     """
     parser = argparse.ArgumentParser(
-        prog="cli-traffic-light",
+        prog="chafficlight",
         description="Traffic light for Claude Code and Codex CLI chat sessions.",
     )
     parser.add_argument(
@@ -76,7 +85,57 @@ def main(argv: list[str] | None = None) -> int:
         help="print one snapshot and exit instead of opening the window",
     )
     parser.add_argument("--json", action="store_true", help="with --once, print JSON")
+    launcher = parser.add_mutually_exclusive_group()
+    launcher.add_argument(
+        "--install-desktop",
+        action="store_true",
+        help="create a click-to-run launcher for this app and exit",
+    )
+    launcher.add_argument(
+        "--uninstall-desktop",
+        action="store_true",
+        help="remove the launcher created by --install-desktop and exit",
+    )
+    # A second group, because starting at login is not an alternative to having a
+    # launcher: --install-desktop --enable-autostart is the ordinary first-run pair.
+    autostart = parser.add_mutually_exclusive_group()
+    autostart.add_argument(
+        "--enable-autostart",
+        action="store_true",
+        help="start this app automatically when you log in, and exit",
+    )
+    autostart.add_argument(
+        "--disable-autostart",
+        action="store_true",
+        help="stop starting this app when you log in, and exit",
+    )
     args = parser.parse_args(argv)
+
+    launchers = args.install_desktop or args.uninstall_desktop
+    logins = args.enable_autostart or args.disable_autostart
+    if launchers or logins:
+        # Imported here so the monitoring paths never load the installer.
+        from .desktop import install, uninstall, unavailable_reason
+
+        if launchers:
+            reason = unavailable_reason()
+            if reason:
+                print(reason)
+            else:
+                removing = args.uninstall_desktop
+                _report(
+                    uninstall() if removing else install(),
+                    removed=removing,
+                    nothing="no launcher was installed",
+                )
+        if logins:
+            removing = args.disable_autostart
+            _report(
+                uninstall(autostart=True) if removing else install(autostart=True),
+                removed=removing,
+                nothing="no autostart entry was installed",
+            )
+        return 0
 
     monitor = Monitor()
     if args.once:
@@ -89,12 +148,10 @@ def main(argv: list[str] | None = None) -> int:
     root = tk.Tk()
     app = TrafficLightApp(root, monitor)
     app.refresh()
-
-    def close() -> None:
-        app.stop()
-        root.destroy()
-
-    root.protocol("WM_DELETE_WINDOW", close)
+    # The window is undecorated, so no window manager will ever send this; the
+    # app's own close button is the real path out. Kept because it costs nothing
+    # and is the correct wiring the moment the window has a title bar again.
+    root.protocol("WM_DELETE_WINDOW", app.close)
     root.mainloop()
     return 0
 

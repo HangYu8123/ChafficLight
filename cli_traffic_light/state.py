@@ -26,18 +26,31 @@ __all__ = [
 
 
 class SessionState(str, Enum):
-    """The four lights a session can show."""
+    """The lights a session can show.
+
+    ``NEEDS_INPUT`` is deliberately narrow: it means the agent has *asked the
+    user something* and cannot continue until it is answered. A session that
+    merely finished its turn and is sitting at its prompt is ``IDLE`` — nothing
+    is blocked on the user, so it must not compete for their attention.
+    """
 
     RUNNING = "running"
     NEEDS_INPUT = "needs_input"
+    IDLE = "idle"
     FINISHED = "finished"
     UNKNOWN = "unknown"
 
 
+#: The signal reads the way a road signal does, from the driver's point of view:
+#: green you may proceed and nothing is wanted from you, red you must stop and
+#: act before anything moves again, yellow the turn is over and the session is
+#: holding. The colour tracks *what the user has to do*, not how severe the state
+#: is — so a session that merely ended is none of the three and takes blue.
 STATE_COLORS: dict[SessionState, str] = {
     SessionState.RUNNING: "#2ecc40",
-    SessionState.NEEDS_INPUT: "#ffdc00",
-    SessionState.FINISHED: "#ff4136",
+    SessionState.NEEDS_INPUT: "#ff4136",
+    SessionState.IDLE: "#ffdc00",
+    SessionState.FINISHED: "#3498db",
     SessionState.UNKNOWN: "#aaaaaa",
 }
 
@@ -70,18 +83,27 @@ class Session:
     pid: int | None
 
 
-#: Exact (case-sensitive) Claude ``status`` values we recognise; anything else is UNKNOWN.
+#: Exact (case-sensitive) Claude ``status`` values we recognise; anything else is
+#: UNKNOWN. The CLI writes exactly four: ``busy`` while the turn runs, ``shell``
+#: when the turn is over but a background shell command is still executing,
+#: ``waiting`` while a dialog is open and the agent is blocked on the user, and
+#: ``idle`` otherwise. Only ``waiting`` is a question for the user — it is
+#: accompanied by a ``waitingFor`` note reading "permission prompt", "input
+#: needed", "sandbox request", "worker request" or "dialog open".
 _CLAUDE_STATUS_STATES = {
     "busy": SessionState.RUNNING,
     "shell": SessionState.RUNNING,
-    "idle": SessionState.NEEDS_INPUT,
+    "waiting": SessionState.NEEDS_INPUT,
+    "idle": SessionState.IDLE,
 }
 
-#: Codex turn events we recognise; any other event (or none) is UNKNOWN.
+#: Codex turn events we recognise; any other event (or none) is UNKNOWN. Codex
+#: never persists its approval prompts to a rollout, so none of these can mean
+#: "the agent asked you something": a turn either runs, ends, or is cancelled.
 _CODEX_TURN_EVENT_STATES = {
     "task_started": SessionState.RUNNING,
-    "task_complete": SessionState.NEEDS_INPUT,
-    "turn_aborted": SessionState.NEEDS_INPUT,
+    "task_complete": SessionState.IDLE,
+    "turn_aborted": SessionState.IDLE,
 }
 
 
@@ -95,7 +117,13 @@ def codex_events_to_state(
     mtime: float,
     now: float,
 ) -> SessionState:
-    """Map a Codex rollout's last turn event plus its file mtime onto a light."""
+    """Map a Codex rollout's last turn event plus its file mtime onto a light.
+
+    Staleness is checked first and covers every event, because a rollout is the
+    only liveness signal Codex offers: nothing records that a session ended, so
+    one untouched for :data:`STALE_SECONDS` is treated as gone whether its last
+    turn started, finished or was cancelled.
+    """
     if now - mtime > STALE_SECONDS:
         return SessionState.FINISHED
     return _CODEX_TURN_EVENT_STATES.get(last_turn_event, SessionState.UNKNOWN)

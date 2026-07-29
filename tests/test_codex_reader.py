@@ -157,15 +157,23 @@ def test_last_turn_event_drives_the_state(tmp_path, monkeypatch):
     monkeypatch.setenv("CODEX_HOME", str(home))
     sessions = _by_id(CodexReader(home, now=lambda: NOW).read_sessions())
     assert sessions["codex-run"].state == SessionState.RUNNING
-    assert sessions["codex-done"].state == SessionState.NEEDS_INPUT
+    assert sessions["codex-done"].state == SessionState.IDLE
 
 
-def test_turn_aborted_rollout_is_needs_input(tmp_path, monkeypatch):
+def test_turn_aborted_rollout_is_idle_not_finished(tmp_path, monkeypatch):
     home = _build_home(tmp_path)
     monkeypatch.setenv("CODEX_HOME", str(home))
     aborted = _by_id(CodexReader(home, now=lambda: NOW).read_sessions())["codex-abort"]
-    assert aborted.state == SessionState.NEEDS_INPUT
+    assert aborted.state == SessionState.IDLE
     assert aborted.state != SessionState.FINISHED
+
+
+def test_no_codex_rollout_is_ever_reported_as_needing_input(tmp_path, monkeypatch):
+    home = _build_home(tmp_path)
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    sessions = CodexReader(home, now=lambda: NOW).read_sessions()
+    assert sessions
+    assert all(s.state != SessionState.NEEDS_INPUT for s in sessions)
 
 
 def test_subagent_rollout_is_excluded(tmp_path, monkeypatch):
@@ -218,7 +226,10 @@ def test_tokens_per_sec_from_successive_token_count_records(tmp_path, monkeypatc
     home = _build_home(tmp_path)
     monkeypatch.setenv("CODEX_HOME", str(home))
     running = _by_id(CodexReader(home, now=lambda: NOW).read_sessions())["codex-run"]
-    assert running.tokens_per_sec == pytest.approx(560.0 / 20.0)
+    # 620 cumulative at NOW-40, 1,180 at NOW-20: the 560 between them, spread
+    # over the 40 s since the first count rather than only the 20 s separating
+    # the two. The records are cumulative, so 620 + 1,180 is never the numerator.
+    assert running.tokens_per_sec == pytest.approx(560.0 / 40.0)
 
 
 def test_last_activity_is_the_rollout_mtime(tmp_path, monkeypatch):

@@ -2,7 +2,15 @@
 __pycache__/
 *.pyc
 .pytest_cache/
+*.egg-info/
+build/
+dist/
 
 # The HarnessFlow workflow pack is a separate, independently-versioned repository
 # checked out inside this one; it is not part of this project's source.
 .github/HarnessFlow/
+.github/copilot-instructions.md
+AGENTS.md
+CLAUDE.md
+.claude/
+.codex/

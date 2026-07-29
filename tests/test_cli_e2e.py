@@ -14,12 +14,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from cli_traffic_light import cli
+from cli_traffic_light.claude import _default_proc_info
 
 
 def _real_proc_start() -> str:
-    """Field 22 of ``/proc/self/stat`` — the value Claude stores as ``procStart``."""
-    with open("/proc/self/stat") as handle:
-        return handle.read().rsplit(")", 1)[1].split()[19]
+    """The value Claude records as ``procStart`` for the running process.
+
+    Taken from the production lookup so the fixture cannot drift from the
+    platform-specific identity the reader compares it against.
+    """
+    return str(_default_proc_info(os.getpid())[1])
 
 
 def _iso(epoch: float) -> str:
@@ -154,7 +158,7 @@ def test_once_json_reports_state_and_tokens_per_session(tmp_path, monkeypatch, c
     _, payload = _run_once(tmp_path, monkeypatch, capsys)
     by_id = {s["session_id"]: s for s in payload["sessions"]}
     assert by_id["cli-claude"]["state"] == "running"
-    assert by_id["cli-codex"]["state"] == "needs_input"
+    assert by_id["cli-codex"]["state"] == "idle"
     assert by_id["cli-claude"]["total_tokens"] == 125
     assert by_id["cli-codex"]["total_tokens"] == 650
     assert isinstance(by_id["cli-claude"]["is_vscode"], bool)

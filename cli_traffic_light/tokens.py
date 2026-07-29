@@ -93,18 +93,30 @@ def tokens_per_second(
     """Rate over the trailing ``window`` seconds of cumulative-total samples.
 
     ``samples`` is ``[(epoch_seconds, cumulative_total_tokens), ...]`` in ascending
-    time order. The rate is the sum of the per-step deltas clamped to be
-    non-negative (so a counter reset contributes zero, not a negative number)
-    divided by the time span the in-window samples actually cover.
+    time order. A step counts when the sample *ending* it falls in the window,
+    that timestamp being when the CLI reported the tokens; each step is clamped
+    to be non-negative, so a counter reset contributes zero rather than a
+    negative number. The step ending just inside the window is measured against
+    the sample before it even though that one has already aged out — dropping it
+    would discard a real step for want of a baseline.
+
+    The divisor is the stretch of the window that has actually elapsed, running
+    to ``now`` rather than to the last sample. Silence is part of the rate: a
+    session that burned tokens and then stopped decays toward zero as the gap
+    grows, instead of holding the rate of its final burst until the samples age
+    out of the window.
     """
-    recent = [(t, total) for t, total in samples if t >= now - window]
-    if len(recent) < 2:
+    if len(samples) < 2:
         return 0.0
-    span = recent[-1][0] - recent[0][0]
-    if span <= 0:
-        return 0.0
+    start = now - window
     gained = sum(
         max(0, later - earlier)
-        for (_, earlier), (_, later) in zip(recent, recent[1:])
+        for (_, earlier), (end, later) in zip(samples, samples[1:])
+        if end > start
     )
-    return gained / span
+    # The window opens at its own start, or later for a session younger than
+    # that — before its first sample there is nothing to have been idle for.
+    elapsed = now - max(start, samples[0][0])
+    if elapsed <= 0:
+        return 0.0
+    return gained / elapsed

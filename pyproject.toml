@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=61"]  # the floor for [project] and [tool.setuptools] here
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "chafficlight"
+description = "Traffic-light monitor for Claude Code CLI and Codex CLI chat sessions."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = ["psutil"]
+dynamic = ["version"]
+
+[project.optional-dependencies]
+test = ["pytest"]
+# Only `tools/build_app.py` needs these, and only on a machine producing a release.
+# Pillow is what converts the one PNG icon into the .ico and .icns each platform wants.
+build = ["pyinstaller>=6", "pillow"]
+
+# The console script is the one to type: it keeps stdout, so --once/--json print.
+[project.scripts]
+chafficlight = "cli_traffic_light.cli:main"
+
+# The GUI script is the one desktop launchers target: on Windows pip wraps it in a
+# pythonw-backed .exe, so no console window opens. It has no usable stdout.
+[project.gui-scripts]
+chafficlight-gui = "cli_traffic_light.cli:main"
+
+[tool.setuptools]
+packages = ["cli_traffic_light"]
+
+# The icon travels with the package: the Linux desktop entry needs a real file to point
+# at, and beside the package is the one place both an installed distribution and a
+# frozen build can find it.
+[tool.setuptools.package-data]
+cli_traffic_light = ["chafficlight.png"]
+
+# Read from the literal in __init__.py via setuptools' AST reader, so building never
+# imports the package (psutil is absent from pip's isolated build environment).
+[tool.setuptools.dynamic]
+version = { attr = "cli_traffic_light.__version__" }

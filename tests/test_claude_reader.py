@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from cli_traffic_light.claude import ClaudeReader
+from cli_traffic_light.claude import _START_TICKS_TOLERANCE, ClaudeReader, _default_proc_info
 from cli_traffic_light.state import SessionState
 
 NOW = 1_753_700_000.0
@@ -22,9 +22,13 @@ DEAD_PID = 999_001
 
 
 def _real_proc_start() -> str:
-    """Field 22 of ``/proc/self/stat`` — the value Claude stores as ``procStart``."""
-    with open("/proc/self/stat") as handle:
-        return handle.read().rsplit(")", 1)[1].split()[19]
+    """The value Claude records as ``procStart`` for the running process.
+
+    Taken from the production lookup so the fixture cannot drift from the
+    platform-specific identity the reader compares it against — the two forms
+    (Linux ``/proc`` ticks, Windows .NET ticks) are not interchangeable.
+    """
+    return str(_default_proc_info(os.getpid())[1])
 
 
 def _iso(epoch: float) -> str:
@@ -189,7 +193,10 @@ def test_tokens_per_sec_uses_clamped_deltas_of_main_thread_records(tmp_path, mon
     home = _build_home(tmp_path)
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home))
     live = _by_id(ClaudeReader(home, now=lambda: NOW).read_sessions())["sess-live"]
-    assert live.tokens_per_sec == pytest.approx(230.0 / 20.0)
+    # The step onto 230 at NOW-20, over the 40 s since the record before it. The
+    # sidechain record at NOW-15 is worth 1,400 and would swamp this if it were
+    # not excluded, so the number is what tells the two apart.
+    assert live.tokens_per_sec == pytest.approx(230.0 / 40.0)
 
 
 def test_last_activity_tracks_the_most_recent_signal(tmp_path, monkeypatch):
@@ -212,10 +219,52 @@ def test_dead_pid_reported_by_the_process_provider_is_finished(tmp_path, monkeyp
 def test_pid_reuse_with_a_mismatched_proc_start_is_finished(tmp_path, monkeypatch):
     home = _build_home(tmp_path)
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home))
-    reused_ticks = int(_real_proc_start()) + 12_345
+    # Offset past the platform's tolerance: a bare +12_345 ticks is 1.2 ms,
+    # which sits inside the Windows window and would pass without detecting
+    # anything.
+    reused_ticks = int(_real_proc_start()) + _START_TICKS_TOLERANCE + 12_345
     reader = ClaudeReader(home, proc_info=lambda pid: (1.0, reused_ticks), now=lambda: NOW)
     sessions = _by_id(reader.read_sessions())
     assert sessions["sess-live"].state == SessionState.FINISHED
+
+
+def test_proc_start_within_the_platform_tolerance_is_still_alive(tmp_path, monkeypatch):
+    """Windows derives its ticks from a float, so exact equality is too strict.
+
+    On Linux the tolerance is 0 and this asserts the unchanged exact match.
+    """
+    home = _build_home(tmp_path)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home))
+    jittered = int(_real_proc_start()) + _START_TICKS_TOLERANCE
+    reader = ClaudeReader(home, proc_info=lambda pid: (1.0, jittered), now=lambda: NOW)
+    assert _by_id(reader.read_sessions())["sess-live"].state == SessionState.RUNNING
+
+
+def test_finished_session_cwd_comes_from_the_transcript_not_the_slug(tmp_path, monkeypatch):
+    """The project slug maps "\\", "/", ":" and "." all onto "-", so it cannot
+    be decoded back; the records carry the real directory."""
+    home = tmp_path / "claude_home_cwd"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home))
+    record = _assistant(NOW - 60, "msg-c", "req-c", _usage(1, 1))
+    record["cwd"] = r"C:\work\Find Papers\.github"
+    _write_jsonl(home / "projects" / "C--work-Find-Papers--github" / "sess-cwd.jsonl", [record])
+    sessions = ClaudeReader(home, now=lambda: NOW).read_sessions()
+    assert len(sessions) == 1
+    assert sessions[0].cwd == r"C:\work\Find Papers\.github"
+
+
+def test_finished_session_cwd_falls_back_to_the_slug_when_records_lack_one(
+    tmp_path, monkeypatch
+):
+    home = tmp_path / "claude_home_noc"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home))
+    _write_jsonl(
+        home / "projects" / "-work-noc" / "sess-noc.jsonl",
+        [_assistant(NOW - 60, "msg-n", "req-n", _usage(1, 1))],
+    )
+    sessions = ClaudeReader(home, now=lambda: NOW).read_sessions()
+    assert len(sessions) == 1
+    assert sessions[0].cwd == "/work/noc"
 
 
 def test_missing_proc_start_never_forces_finished(tmp_path, monkeypatch):
@@ -232,6 +281,28 @@ def test_missing_proc_start_never_forces_finished(tmp_path, monkeypatch):
     sessions = ClaudeReader(home, now=lambda: NOW).read_sessions()
     assert len(sessions) == 1
     assert sessions[0].state == SessionState.RUNNING
+
+
+def test_waiting_session_needs_input(tmp_path, monkeypatch):
+    """A live session with a dialog open is the one thing that earns red.
+
+    ``waiting`` is what the CLI was observed writing while a prompt was on
+    screen — ``{"status": "waiting", "waitingFor": "input needed", ...}`` — so
+    this pins the whole path from that record to the red light.
+    """
+    home = tmp_path / "claude_home_waiting"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home))
+    _write_session_file(
+        home, os.getpid(), "sess-wait", "/work/wait", "waiting", "asking you",
+        _real_proc_start(), NOW - 5,
+    )
+    _write_jsonl(
+        home / "projects" / "-work-wait" / "sess-wait.jsonl",
+        [_assistant(NOW - 60, "msg-w", "req-w", _usage(3, 7))],
+    )
+    sessions = ClaudeReader(home, now=lambda: NOW).read_sessions()
+    assert len(sessions) == 1
+    assert sessions[0].state == SessionState.NEEDS_INPUT
 
 
 def test_duplicate_message_and_request_ids_keep_the_last_usage(tmp_path, monkeypatch):
@@ -254,4 +325,4 @@ def test_duplicate_message_and_request_ids_keep_the_last_usage(tmp_path, monkeyp
     assert total == 440
     assert total != 11
     assert total != 451
-    assert sessions[0].state == SessionState.NEEDS_INPUT
+    assert sessions[0].state == SessionState.IDLE

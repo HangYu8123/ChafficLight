@@ -10,7 +10,9 @@ themselves keep on disk.
 from __future__ import annotations
 
 import json
+import sys
 import time
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Iterable
 
@@ -22,25 +24,57 @@ from .tokens import TokenUsage, claude_usage_from_record, tokens_per_second
 
 __all__ = ["ClaudeReader"]
 
+_IS_WINDOWS = sys.platform == "win32"
+
 #: Zero-based index of ``starttime`` (field 22) in ``/proc/<pid>/stat``, counted
 #: after the ``(comm)`` field, which may itself contain spaces or brackets.
 _STAT_STARTTIME_OFFSET = 19
+
+#: Epoch of a .NET ``DateTime`` tick count, the form ``procStart`` takes on
+#: Windows. ``Process.StartTime`` builds it with ``DateTime.FromFileTime``,
+#: which returns a ``Local``-kind value, so the ticks are local time — reading
+#: them as UTC is wrong by the machine's offset.
+_DOTNET_EPOCH = datetime(1, 1, 1)
+
+#: How far a freshly derived start value may sit from the recorded one and still
+#: count as the same process. Linux compares two exact integers, so nothing is
+#: allowed. Windows derives its ticks from ``create_time()``, a float that loses
+#: about a microsecond at epoch magnitudes, so 1 ms of ticks absorbs the
+#: rounding while staying far tighter than any interval a pid is reused over.
+_START_TICKS_TOLERANCE = 10_000 if _IS_WINDOWS else 0
 
 #: Only transcript lines carrying this key can hold token usage, so the rest are
 #: skipped before being parsed.
 _USAGE_KEY = '"usage"'
 
 
+def _dotnet_ticks(epoch: float) -> int:
+    """``epoch`` seconds as .NET ticks: 100 ns units since 0001-01-01, local time.
+
+    Kept in integer arithmetic throughout: ``timedelta.total_seconds()`` is a
+    float and would round away several hundred ticks at this magnitude.
+    """
+    local = datetime.fromtimestamp(epoch)
+    return (local - _DOTNET_EPOCH) // timedelta(microseconds=1) * 10
+
+
 def _default_proc_info(pid: int) -> tuple[float, int] | None:
-    """``(create_time, /proc/<pid>/stat field 22)`` for a live pid, else ``None``."""
+    """``(create_time, start identity)`` for a live pid, else ``None``.
+
+    The identity is in whatever form the CLI writes ``procStart`` on this
+    platform, so the two can be compared directly: ``/proc/<pid>/stat`` field 22
+    on Linux, .NET local ticks on Windows.
+    """
     if not isinstance(pid, int) or isinstance(pid, bool):
         return None
     try:
         create_time = psutil.Process(pid).create_time()
+        if _IS_WINDOWS:
+            return create_time, _dotnet_ticks(create_time)
         with open(f"/proc/{pid}/stat", encoding="utf-8") as handle:
             fields = handle.read().rsplit(")", 1)[1].split()
         return create_time, int(fields[_STAT_STARTTIME_OFFSET])
-    except (psutil.Error, OSError, IndexError, ValueError):
+    except (psutil.Error, OSError, IndexError, ValueError, OverflowError):
         return None
 
 
@@ -136,12 +170,12 @@ class ClaudeReader:
         for path in sorted(projects.glob("*/*/subagents/*.jsonl")):
             if _mtime_is_stale(path, now):
                 continue
-            main, sidechain = self._transcript_samples(path)
+            main, sidechain, _ = self._transcript_samples(path)
             samples += main + sidechain
         return _total_usage(samples)
 
-    def _transcript_samples(self, path: Path) -> tuple[list, list]:
-        """``(main-thread, sidechain)`` usage samples of one transcript.
+    def _transcript_samples(self, path: Path) -> tuple[list, list, str]:
+        """``(main-thread samples, sidechain samples, session cwd)`` of one transcript.
 
         Parsed once per file revision and kept: a refresh walks the same
         transcripts twice — once for the sessions, once for the subagent
@@ -152,14 +186,20 @@ class ClaudeReader:
         try:
             stat = path.stat()
         except OSError:
-            return [], []
+            return [], [], ""
         key = (stat.st_mtime, stat.st_size)
         cached = self._samples.get(path)
         if cached is None or cached[0] != key:
-            main, sidechain = [], []
+            main, sidechain, cwd = [], [], ""
             for record in read_jsonl(path, only_lines_with=_USAGE_KEY):
-                (sidechain if record.get("isSidechain") else main).append(record)
-            cached = (key, (_usage_samples(main), _usage_samples(sidechain)))
+                is_sidechain = record.get("isSidechain")
+                (sidechain if is_sidechain else main).append(record)
+                # The records carry the directory the session was in when each
+                # was written; the first is the one the session started in,
+                # before any directory change the agent made.
+                if not is_sidechain and not cwd:
+                    cwd = record.get("cwd") or ""
+            cached = (key, (_usage_samples(main), _usage_samples(sidechain), cwd))
             self._samples[path] = cached
         return cached[1]
 
@@ -201,7 +241,7 @@ class ClaudeReader:
 
     def _finished_session(self, session_id: str, path: Path, now: float) -> Session | None:
         """Build the session a transcript with no live session file describes."""
-        samples = self._transcript_samples(path)[0]
+        samples, _, cwd = self._transcript_samples(path)
         last_activity = samples[-1][0] if samples else 0.0
         if is_stale(last_activity, now):
             return None
@@ -209,7 +249,11 @@ class ClaudeReader:
             session_id=session_id,
             agent="claude",
             title=session_id,
-            cwd=path.parent.name.replace("-", "/"),
+            # The records' own cwd, because the project directory name it falls
+            # back to cannot be decoded: the slug maps "\", "/", ":" and "."
+            # all onto "-", so "...FindPapers--github" is equally
+            # "FindPapers\.github" and "FindPapers\-github".
+            cwd=cwd or path.parent.name.replace("-", "/"),
             state=SessionState.FINISHED,
             usage=_total_usage(samples),
             tokens_per_sec=_rate(samples, now),
@@ -222,10 +266,12 @@ class ClaudeReader:
     def _is_alive(self, pid, proc_start) -> bool:
         """Whether ``pid`` is still the process the session file recorded.
 
-        ``procStart`` is field 22 of ``/proc/<pid>/stat`` — boot-relative clock
-        ticks, not epoch seconds — and pins the identity of a pid that may since
-        have been reused. When it is missing or unparseable there is nothing to
-        compare, so pid liveness alone decides.
+        ``procStart`` pins the identity of a pid that may since have been
+        reused. Its units are the platform's, never epoch seconds: boot-relative
+        clock ticks from ``/proc/<pid>/stat`` on Linux, .NET local ticks on
+        Windows, compared within :data:`_START_TICKS_TOLERANCE` of each other.
+        When it is missing or unparseable there is nothing to compare, so pid
+        liveness alone decides.
         """
         info = self._proc_info(pid)
         if info is None:
@@ -234,7 +280,7 @@ class ClaudeReader:
             recorded_ticks = int(proc_start)
         except (TypeError, ValueError):
             return True
-        return recorded_ticks == info[1]
+        return abs(recorded_ticks - info[1]) <= _START_TICKS_TOLERANCE
 
 
 def _mtime_is_stale(path: Path, now: float) -> bool:

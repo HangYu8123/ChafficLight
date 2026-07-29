@@ -8,6 +8,7 @@ VS Code integrated terminal.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
 __all__ = ["VSCodeDetection", "detect_vscode"]
@@ -21,15 +22,45 @@ _ENV_MARKERS = (
 )
 
 
+def _basename(name: str) -> str:
+    """The trailing component of ``name``, lowercased and without ``.exe``.
+
+    Both separators are honoured whatever platform this runs on, because the
+    strings come from another process's ancestry rather than from this one.
+    """
+    stem = name.replace("\\", "/").rsplit("/", 1)[-1].lower()
+    return stem[:-4] if stem.endswith(".exe") else stem
+
+
 def _is_vscode_ancestor(name: str) -> bool:
     """Whether an ancestor process name/command belongs to VS Code.
 
-    A bare ``node`` is not enough — only a ``node`` under a ``.vscode-server``
-    install path counts, so unrelated Node processes never promote a session.
+    Compared on the basename because the same process is ``code`` on Linux and
+    ``Code.exe`` — usually reported as a full path — on Windows. A bare ``node``
+    is not enough: only a ``node`` under a ``.vscode-server`` install path
+    counts, so unrelated Node processes never promote a session.
     """
-    if name in ("code", "code-server"):
+    path = name.replace("\\", "/")
+    stem = _basename(path)
+    if stem in ("code", "code-server"):
         return True
-    return ".vscode-server/bin/" in name and name.endswith("/node")
+    return ".vscode-server/bin/" in path and stem == "node"
+
+
+def _paths_equal(left: str, right: str) -> bool:
+    """Whether two paths name the same directory, without touching the disk.
+
+    ``normcase`` lowercases and unifies separators on Windows and does nothing
+    at all on POSIX, so a Windows drive letter matches in either case while a
+    case-sensitive filesystem stays case-sensitive; ``normpath`` additionally
+    settles a trailing separator. Neither reads the filesystem, which matters
+    because a ``workspaceFolders`` entry may name a directory that is not there.
+    Either side may also be missing or not a string at all, since one of them
+    comes from a lock file this app does not write.
+    """
+    if not (isinstance(left, str) and isinstance(right, str) and left and right):
+        return False
+    return os.path.normcase(os.path.normpath(left)) == os.path.normcase(os.path.normpath(right))
 
 
 @dataclass
@@ -62,7 +93,8 @@ def detect_vscode(
 
     cwd = env.get("PWD")
     for lock in ide_locks:
-        if lock.get("alive") and cwd in lock.get("workspaceFolders", []):
+        folders = lock.get("workspaceFolders") or []
+        if lock.get("alive") and any(_paths_equal(cwd, folder) for folder in folders):
             return VSCodeDetection(True, "likely")
 
     return VSCodeDetection(False, "none")
