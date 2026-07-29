@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# The HarnessFlow workflow pack is a separate, independently-versioned repository
+# checked out inside this one; it is not part of this project's source.
+.github/HarnessFlow/
