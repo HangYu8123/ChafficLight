@@ -64,7 +64,7 @@ _OFF_FACE_STATES = (SessionState.FINISHED, SessionState.UNKNOWN)
 _UNLIT_COLORS = {
     SessionState.RUNNING: "#1f4623",
     SessionState.NEEDS_INPUT: "#534a13",
-    SessionState.IDLE: "#532321",
+    SessionState.IDLE: "#532f2c",
 }
 
 #: The unlit shade for a lamp added since this table was written. Neutral dark,
@@ -131,8 +131,11 @@ _GLOW_ALPHA = 130
 
 #: Counts sit inside the lamp, so they are read against the lamp's own colour.
 #: Black clears WCAG AA on all three lit colours (9.8:1 green, 15.5:1 yellow,
-#: 6.1:1 red) where white clears none of them — including red, which is light
-#: enough at #ff4136 that the usual white-on-red instinct fails.
+#: 4.7:1 red) where white clears none of them — including red, which even as the
+#: muted brick it now is stays light enough that the usual white-on-red instinct
+#: fails. Red is the one with headroom to spare: toning it down any further
+#: takes the count below AA against it, and that is the floor a darker red has
+#: to buy its way past by giving *that* lamp white text of its own.
 _LIT_TEXT_COLOR = "#000000"
 _UNLIT_TEXT_COLOR = "#c8c8c8"
 

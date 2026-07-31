@@ -48,10 +48,18 @@ class SessionState(str, Enum):
 #: how much is still happening on its own, and yellow — the one colour that
 #: means "act" on a road — is the one that wants you. A session that has ended
 #: is none of the three and takes blue.
+#:
+#: Red is a muted brick rather than the signal red it started as, and it is
+#: deliberately the quietest of the three: it means "nothing is happening here",
+#: it is lit whenever a session is simply sitting at its prompt, and so it is
+#: the colour the face wears most of the time. At full saturation that made the
+#: widget shout its least urgent state. Toned down it still reads red — the hue
+#: barely moves, which is what keeps it left of yellow on the housing — while
+#: yellow and green now stand further off the case than it does.
 STATE_COLORS: dict[SessionState, str] = {
     SessionState.RUNNING: "#2ecc40",
     SessionState.NEEDS_INPUT: "#ffdc00",
-    SessionState.IDLE: "#ff4136",
+    SessionState.IDLE: "#c2564e",
     SessionState.FINISHED: "#3498db",
     SessionState.UNKNOWN: "#aaaaaa",
 }

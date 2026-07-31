@@ -25,9 +25,11 @@ from cli_traffic_light.gui import (
     _DRAG_TAG,
     _KEY_COLOR,
     _LAMP_ORDER,
+    _LIT_TEXT_COLOR,
     _OFF_FACE_STATES,
     _OPAQUE_BACKDROP,
     _UNLIT_COLORS,
+    _UNLIT_TEXT_COLOR,
     _Layout,
     TrafficLightApp,
     _hex_to_rgb,
@@ -291,8 +293,35 @@ def test_each_unlit_shade_is_a_dark_version_of_its_own_lamp():
     assert _UNLIT_COLORS == {
         SessionState.RUNNING: "#1f4623",
         SessionState.NEEDS_INPUT: "#534a13",
-        SessionState.IDLE: "#532321",
+        SessionState.IDLE: "#532f2c",
     }
+
+
+def _contrast(first: str, second: str) -> float:
+    """WCAG 2.x contrast ratio between two ``"#rrggbb"`` colours."""
+
+    def luminance(color: str) -> float:
+        channels = (part / 255 for part in _hex_to_rgb(color))
+        linear = [c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4 for c in channels]
+        return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+
+    lighter, darker = sorted((luminance(first), luminance(second)), reverse=True)
+    return (lighter + 0.05) / (darker + 0.05)
+
+
+def test_every_count_is_legible_on_the_lamp_it_sits_in():
+    """One fixed text colour per half, so a retuned lamp can hide its own count.
+
+    The counts are drawn *inside* the lamps, and both text colours are single
+    constants shared by all three — so nothing about changing one lamp's shade
+    forces a second look at the digit on top of it. Red is the live case: it was
+    toned down because it shouted, and the AA floor is what says how much
+    further it can go before the count stops being readable rather than before
+    it stops looking good. 4.5:1 is AA for text this size.
+    """
+    for state in _LAMP_ORDER:
+        assert _contrast(_LIT_TEXT_COLOR, STATE_COLORS[state]) >= 4.5, state
+        assert _contrast(_UNLIT_TEXT_COLOR, _UNLIT_COLORS[state]) >= 4.5, state
 
 
 def test_two_states_light_two_housing_lamps_at_once(tmp_path, monkeypatch, tk_root):

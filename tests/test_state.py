@@ -65,7 +65,7 @@ def test_each_signal_colour_means_what_the_light_says():
     """
     assert STATE_COLORS[SessionState.RUNNING] == "#2ecc40"      # moving, nothing wanted
     assert STATE_COLORS[SessionState.NEEDS_INPUT] == "#ffdc00"  # your attention, answer it
-    assert STATE_COLORS[SessionState.IDLE] == "#ff4136"         # stopped, awaiting a prompt
+    assert STATE_COLORS[SessionState.IDLE] == "#c2564e"         # stopped, awaiting a prompt
 
 
 def test_states_that_are_not_a_signal_do_not_borrow_a_signal_colour():

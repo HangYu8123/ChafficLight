@@ -102,6 +102,15 @@ def codex_usage_from_total(total_token_usage: dict) -> TokenUsage:
     )
 
 
+#: How long after a step's last sample the rate still describes anything. Past it
+#: the figure reads zero instead of an ever-thinner slice of an old burst: dividing
+#: by the silence decays hyperbolically, so a session idle for half an hour still
+#: reported about 1 tok/s, and the face — which sums every session on it — never
+#: settled at zero with nothing running. A minute is well clear of the few seconds
+#: either CLI leaves between billed records while a turn is producing tokens.
+_STALE_AFTER = 60.0
+
+
 def tokens_per_second(samples: list[tuple[float, int]], now: float) -> float:
     """Rate of the newest step of cumulative-total samples, aged by the silence after it.
 
@@ -123,6 +132,11 @@ def tokens_per_second(samples: list[tuple[float, int]], now: float) -> float:
     to the step's own end when that is later than ``now``, which is only ever the
     CLI's clock reading slightly ahead of ours — the alternative is reporting
     zero for the very step that just landed.
+
+    That decay alone never arrives at zero, so a step whose last sample is more
+    than :data:`_STALE_AFTER` old reports no rate at all. Nothing has been billed
+    on that session for a minute; a fraction of a burst that is over is not a
+    speed it is running at now.
     """
     latest: tuple[float, float, int] | None = None
     for (start, earlier), (end, later) in zip(samples, samples[1:]):
@@ -131,6 +145,8 @@ def tokens_per_second(samples: list[tuple[float, int]], now: float) -> float:
     if latest is None:
         return 0.0
     start, end, gained = latest
+    if now - end > _STALE_AFTER:
+        return 0.0
     elapsed = max(now, end) - start
     if elapsed <= 0:
         return 0.0

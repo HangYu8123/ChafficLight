@@ -206,6 +206,28 @@ def test_tokens_per_second_is_zero_without_a_step_that_gained(samples):
     assert tokens_per_second(samples, NOW) == 0.0
 
 
+def test_tokens_per_second_is_zero_once_the_step_has_gone_quiet():
+    """The bug this guards: an idle session kept reporting a rate for hours.
+
+    Dividing by the growing silence decays but never arrives, so a burst that
+    ended half an hour ago still read about 1 tok/s — and the face sums every
+    session on it, so several of those never let it settle at zero.
+    """
+    burst = [(NOW - 32.0, 0), (NOW - 30.0, 2_000)]
+    assert tokens_per_second(burst, NOW) > 0.0
+    assert tokens_per_second(burst, NOW + 1_800.0) == 0.0
+
+
+def test_tokens_per_second_survives_the_gap_between_two_billed_records():
+    """A turn in flight must not blink to zero between records.
+
+    Neither CLI bills while a message is in flight, so the newest step can be
+    tens of seconds old on a session that is very much running. The cutoff sits
+    past that gap, not inside it.
+    """
+    assert tokens_per_second([(NOW - 40.0, 0), (NOW - 30.0, 900)], NOW) > 0.0
+
+
 def test_tokens_per_second_is_zero_when_the_step_span_is_zero():
     assert tokens_per_second([(NOW, 10), (NOW, 90)], NOW) == 0.0
 
