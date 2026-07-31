@@ -1,16 +1,25 @@
+# Python build and environment leftovers.
 .venv/
 __pycache__/
 *.pyc
 .pytest_cache/
 *.egg-info/
 build/
-# dist/
 
-# The HarnessFlow workflow pack is a separate, independently-versioned repository
-# checked out inside this one; it is not part of this project's source.
-# .github/HarnessFlow/
-# .github/copilot-instructions.md
-# AGENTS.md
-# CLAUDE.md
-# .claude/
-# .codex/
+# Agent-harness tooling that happens to live in this checkout. HarnessFlow is a
+# separate, independently-versioned repository; the rest are per-assistant entry
+# points into it. None of it is needed to build, run or test this project.
+.github/HarnessFlow/
+.github/copilot-instructions.md
+AGENTS.md
+CLAUDE.md
+.claude/
+.codex/
+
+# dist/ keeps one packed archive per platform. The loose executables PyInstaller
+# leaves beside them are those archives' own contents, so tracking both would
+# store every binary twice.
+dist/*
+!dist/ChafficLight-*-windows.zip
+!dist/ChafficLight-*-linux.tar.gz
+!dist/ChafficLight-*-macos.tar.gz

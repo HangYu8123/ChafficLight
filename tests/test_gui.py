@@ -6,7 +6,9 @@ CLI chat sessions and shows a green light while a session is running, a yellow
 light when it needs their input and a red light once it has finished.
 """
 
+import colorsys
 import json
+import math
 import os
 import sys
 import time
@@ -18,8 +20,7 @@ import pytest
 
 from cli_traffic_light.claude import _default_proc_info
 from cli_traffic_light.gui import (
-    _CLOSE_CENTER_X,
-    _CLOSE_CENTER_Y,
+    _CLOSE_FILL_COLOR,
     _CLOSE_TAG,
     _DRAG_TAG,
     _KEY_COLOR,
@@ -27,7 +28,11 @@ from cli_traffic_light.gui import (
     _OFF_FACE_STATES,
     _OPAQUE_BACKDROP,
     _UNLIT_COLORS,
+    _Layout,
     TrafficLightApp,
+    _hex_to_rgb,
+    _photo_pixel,
+    enable_hidpi,
 )
 from cli_traffic_light.monitor import Monitor
 from cli_traffic_light.state import STATE_COLORS, SessionState
@@ -257,13 +262,22 @@ def test_the_housing_carries_the_three_signal_states_in_signal_order():
     ``_LAMP_ORDER`` is what puts a state on the face at all, so this is where a
     state silently losing or gaining a lamp shows up. The colours those three
     states carry are pinned in ``test_state.py``; repeating them here would put
-    the same literals in a third place.
+    the same literals in a third place — but the *seats* belong here, because
+    which state sits where has to follow whichever colour it carries. A state
+    that swapped colour without swapping seat would leave the housing reading
+    yellow-red-green, which is not a traffic light and which nothing else
+    catches: ``_LAMP_ORDER`` alone cannot say what colour it is putting there.
     """
     assert _LAMP_ORDER == (
-        SessionState.NEEDS_INPUT,
         SessionState.IDLE,
+        SessionState.NEEDS_INPUT,
         SessionState.RUNNING,
     )
+    # Red before yellow before green, checked as hue rather than as three more
+    # copies of the hex: hue *is* what "red before yellow before green" means,
+    # and it stays true if a lamp's exact shade is ever retuned.
+    hues = [colorsys.rgb_to_hsv(*_hex_to_rgb(STATE_COLORS[s]))[0] for s in _LAMP_ORDER]
+    assert hues == sorted(hues), "the lamps are not in red-yellow-green order"
 
 
 def test_each_unlit_shade_is_a_dark_version_of_its_own_lamp():
@@ -276,8 +290,8 @@ def test_each_unlit_shade_is_a_dark_version_of_its_own_lamp():
     """
     assert _UNLIT_COLORS == {
         SessionState.RUNNING: "#1f4623",
-        SessionState.NEEDS_INPUT: "#532321",
-        SessionState.IDLE: "#534a13",
+        SessionState.NEEDS_INPUT: "#534a13",
+        SessionState.IDLE: "#532321",
     }
 
 
@@ -298,46 +312,171 @@ def test_two_states_light_two_housing_lamps_at_once(tmp_path, monkeypatch, tk_ro
         assert lamps[SessionState.NEEDS_INPUT]["text"] == "1"
         assert lamps[SessionState.IDLE]["text"] == "1"
         lit = [state for state in _LAMP_ORDER if lamps[state]["text"] != "0"]
-        assert lit == [SessionState.NEEDS_INPUT, SessionState.IDLE]
+        assert lit == [SessionState.IDLE, SessionState.NEEDS_INPUT]
         assert lamps[SessionState.NEEDS_INPUT]["fill"] == STATE_COLORS[SessionState.NEEDS_INPUT]
         assert lamps[SessionState.IDLE]["fill"] == STATE_COLORS[SessionState.IDLE]
     finally:
         app.stop()
 
 
-def test_token_total_and_rate_are_shown_under_the_light(tmp_path, monkeypatch, tk_root):
+def test_the_yellow_lamp_flashes_while_it_has_sessions(tmp_path, monkeypatch, tk_root):
+    """Yellow is the blocking state, so it moves; nothing else on the face does.
+
+    The blink is driven by calling the timer callback rather than by waiting
+    ``_FLASH_MS`` of real time, so this asserts the alternation itself instead of
+    racing it. What must hold at every step is that the lamp still reads as
+    yellow or as its own dark shade — never as another lamp's colour — and that
+    its count stays put and stays legible against whichever shade is showing.
+
+    A *lit* red session runs alongside it throughout, because "only yellow
+    flashes" is the requirement and a red lamp that happened to be dark anyway
+    would not be evidence of it: the lamp that must hold still is the one that
+    is on.
+    """
     claude_home = _build_homes(tmp_path, monkeypatch)
-    # A second billed record 10 s after the first, so the rate is a real
-    # non-zero number: asserting only 0.0 would pass just as well if the rate
-    # were hardcoded or the sum dropped a term.
-    now = time.time()
-    transcript = claude_home / "projects" / "-work-gui" / "gui-sess.jsonl"
-    with transcript.open("a", encoding="utf-8") as handle:
-        handle.write(
-            json.dumps(
-                {
-                    "type": "assistant",
-                    "isSidechain": False,
-                    "requestId": "req-gui-2",
-                    "timestamp": _iso(now - 20),
-                    "message": {
-                        "id": "msg-gui-2",
-                        "role": "assistant",
-                        "usage": {"input_tokens": 80, "output_tokens": 20},
-                    },
-                }
-            )
-            + "\n"
-        )
+    _write_session_file(claude_home, "waiting")
+    _add_idle_codex_session(tmp_path / "codex_home")
     app = TrafficLightApp(tk_root, Monitor(), refresh_ms=50_000)
     try:
         app.refresh()
         tk_root.update_idletasks()
+        # A lamp that has just come on starts lit: the light must not spend the
+        # first half-blink dark while a session is already waiting.
+        yellow = app.lamps()[SessionState.NEEDS_INPUT]
+        assert yellow["fill"] == STATE_COLORS[SessionState.NEEDS_INPUT]
+        assert yellow["text"] == "1" and yellow["text_fill"] == "#000000"
+
+        seen = []
+        for _ in range(4):
+            app._flash_tick()
+            tk_root.update_idletasks()
+            lamps = app.lamps()
+            seen.append(lamps[SessionState.NEEDS_INPUT]["fill"])
+            # The count is what the lamp is for; it stays through both halves,
+            # in whichever colour is readable on the shade underneath it.
+            assert lamps[SessionState.NEEDS_INPUT]["text"] == "1"
+            assert lamps[SessionState.NEEDS_INPUT]["text_fill"] == (
+                "#000000"
+                if seen[-1] == STATE_COLORS[SessionState.NEEDS_INPUT]
+                else "#c8c8c8"
+            )
+            # Only yellow flashes — red, the state it swapped with, is lit here
+            # and stays lit. Two lamps blinking would be two things competing
+            # for the same glance, which is the whole point of flashing one.
+            assert lamps[SessionState.IDLE]["fill"] == STATE_COLORS[SessionState.IDLE]
+            assert lamps[SessionState.IDLE]["text"] == "1"
+            assert lamps[SessionState.RUNNING]["fill"] == _UNLIT_COLORS[
+                SessionState.RUNNING
+            ]
+        assert seen == [
+            _UNLIT_COLORS[SessionState.NEEDS_INPUT],
+            STATE_COLORS[SessionState.NEEDS_INPUT],
+            _UNLIT_COLORS[SessionState.NEEDS_INPUT],
+            STATE_COLORS[SessionState.NEEDS_INPUT],
+        ]
+
+        # A refresh mid-blink must not fight the blink: the lamp is dark here and
+        # stays dark until the flash timer says otherwise.
+        app._flash_tick()
+        app.refresh()
+        tk_root.update_idletasks()
+        assert app.lamps()[SessionState.NEEDS_INPUT]["fill"] == _UNLIT_COLORS[
+            SessionState.NEEDS_INPUT
+        ]
+    finally:
+        app.stop()
+
+
+def test_the_flash_stops_and_leaves_the_lamp_dark_when_nothing_is_waiting(
+    tmp_path, monkeypatch, tk_root
+):
+    """The blink is a state, so it must end when the state does.
+
+    Two failures live here and neither is visible on a screenshot: a timer left
+    running forever on a face with nothing waiting, and a lamp stranded on the
+    lit half of a blink that stopped — a yellow light that means nothing.
+    """
+    claude_home = _build_homes(tmp_path, monkeypatch)
+    app = TrafficLightApp(tk_root, Monitor(), refresh_ms=50_000)
+    try:
+        app.refresh()
+        # Nothing waiting: the blink timer never starts at all.
+        assert app._flash_after_id is None
+
+        _write_session_file(claude_home, "waiting")
+        app.refresh()
+        assert app._flash_after_id is not None
+
+        # The question was answered, and the flash goes with it.
+        app._flash_tick()  # leave the blink on its dark half...
+        _write_session_file(claude_home, "busy")
+        app.refresh()
+        tk_root.update_idletasks()
+        assert app._flash_after_id is None
+        lamps = app.lamps()
+        assert lamps[SessionState.NEEDS_INPUT]["text"] == "0"
+        assert lamps[SessionState.NEEDS_INPUT]["fill"] == _UNLIT_COLORS[
+            SessionState.NEEDS_INPUT
+        ]
+        # ...and the next session that waits still opens lit, rather than
+        # inheriting the half the last one stopped on.
+        _write_session_file(claude_home, "waiting")
+        app.refresh()
+        tk_root.update_idletasks()
+        assert app.lamps()[SessionState.NEEDS_INPUT]["fill"] == STATE_COLORS[
+            SessionState.NEEDS_INPUT
+        ]
+    finally:
+        app.stop()
+
+
+def test_token_total_and_rate_are_shown_under_the_light(tmp_path, monkeypatch, tk_root):
+    """The figure opens at zero and then counts what this window watched.
+
+    The fixture already has 125 billed tokens on disk before the app is built,
+    which is exactly the history the reset exists to leave out: both CLIs count
+    cumulatively and keep a transcript for a day, so the face would otherwise
+    open at whatever yesterday came to.
+    """
+    claude_home = _build_homes(tmp_path, monkeypatch)
+    app = TrafficLightApp(tk_root, Monitor(), refresh_ms=50_000)
+    try:
+        app.refresh()
+        tk_root.update_idletasks()
+        assert app.stats()["tokens"] == "0 tokens"
+
+        # A second billed record 10 s after the first, so the rate is a real
+        # non-zero number too: asserting only 0.0 would pass just as well if the
+        # rate were hardcoded or the sum dropped a term.
+        now = time.time()
+        transcript = claude_home / "projects" / "-work-gui" / "gui-sess.jsonl"
+        with transcript.open("a", encoding="utf-8") as handle:
+            handle.write(
+                json.dumps(
+                    {
+                        "type": "assistant",
+                        "isSidechain": False,
+                        "requestId": "req-gui-2",
+                        "timestamp": _iso(now - 20),
+                        "message": {
+                            "id": "msg-gui-2",
+                            "role": "assistant",
+                            "usage": {"input_tokens": 80, "output_tokens": 20},
+                        },
+                    }
+                )
+                + "\n"
+            )
+        app.refresh()
+        tk_root.update_idletasks()
         stats = app.stats()
-        # 100 + 20 + 5 billed first, then 80 + 20. Only the second lot is a
-        # measurable step, and it is spread over the whole 30 s since the first
-        # record — the 10 s between the two plus the 20 s of silence since.
-        assert stats["tokens"] == "225 tokens"
+        # Only the 80 + 20 that arrived while the window was open, not the
+        # 100 + 20 + 5 that was already there.
+        assert stats["tokens"] == "100 tokens"
+        # The rate is unaffected by the reset: it has always been the newest
+        # step between two readings, and that step is spread across the whole
+        # 30 s since the record it is measured from — the 10 s between the two
+        # plus the 20 s of silence since.
         assert stats["rate"] == "3.3 tok/s"
     finally:
         app.stop()
@@ -367,11 +506,11 @@ def test_repainting_does_not_accumulate_canvas_items(tmp_path, monkeypatch, tk_r
 def _lamp_center(app: TrafficLightApp, state: SessionState) -> tuple[float, float]:
     """Where a lamp actually landed, read back off the canvas.
 
-    Reaches for the item ids because the geometry is the thing under test: a
-    reading taken from the module constants would agree with itself no matter
-    what was drawn.
+    Taken from the drawn extent rather than from the layout, because the
+    geometry is the thing under test: a reading computed from the same numbers
+    the app drew with would agree with itself no matter what appeared.
     """
-    x0, y0, x1, y1 = app._canvas.coords(app._lamps[state][0])
+    x0, y0, x1, y1 = app._canvas.bbox(app._lamps[state][0])
     return (x0 + x1) / 2, (y0 + y1) / 2
 
 
@@ -390,25 +529,39 @@ def test_the_signal_face_is_horizontal(tmp_path, monkeypatch, tk_root):
 
 
 def test_the_close_button_is_opaque_and_on_top(tmp_path, monkeypatch, tk_root):
-    """A keyed pixel is click-through, so the ✕ must be filled and topmost.
+    """A keyed pixel is click-through, so the ✕ must be painted and topmost.
 
-    An unfilled oval is hit-tested on its outline alone and a key-coloured one
-    is clicked straight through on Windows; either would leave a window with no
-    title bar and no way to close it.
+    Read out of the image the canvas is actually showing rather than off the
+    colour it was asked for: a button rendered onto the keyed backdrop would be
+    clicked straight through on Windows, and that only shows in the pixels.
+    Every pixel across the middle of the disc is checked, because one keyed
+    patch inside it is a hole in the only affordance the window has.
     """
     _build_homes(tmp_path, monkeypatch)
     app = TrafficLightApp(tk_root, Monitor(), refresh_ms=50_000)
     try:
         close_items = set(app._canvas.find_withtag(_CLOSE_TAG))
-        assert close_items
-        fills = {app._canvas.itemcget(item, "fill") for item in close_items}
-        assert _KEY_COLOR not in fills
-        assert "" not in fills
+        assert len(close_items) == 1
+        button = next(iter(close_items))
+        photo = app._images[app._canvas.itemcget(button, "image")]
+        middle = app._layout.close_half
+        reach = app._layout.close_radius // 2  # a square well inside the disc
+        painted = [
+            _hex_to_rgb(_photo_pixel(photo, middle + dx, middle + dy))
+            for dx in range(-reach, reach + 1)
+            for dy in range(-reach, reach + 1)
+        ]
+        assert _hex_to_rgb(_KEY_COLOR) not in painted
+        # Nor a shade a pixel or two off it, which dodges the exact comparison
+        # while still being an invisible button on a keyed-out backdrop. Every
+        # one of these is either the disc or the ✕ drawn on it, and the disc is
+        # the darkest of them.
+        assert min(sum(pixel) for pixel in painted) > sum(_hex_to_rgb(_CLOSE_FILL_COLOR)) / 2
         assert "<ButtonRelease-1>" in app._canvas.tag_bind(_CLOSE_TAG)
 
-        x, y = _CLOSE_CENTER_X, _CLOSE_CENTER_Y
+        x, y = app._layout.close_center_x, app._layout.close_center_y
         under_the_pointer = app._canvas.find_overlapping(x - 1, y - 1, x + 1, y + 1)
-        # Tk delivers a click to the topmost item, which must not be the card
+        # Tk delivers a click to the topmost item, which must not be the housing
         # drawn underneath the button.
         assert under_the_pointer[-1] in close_items
     finally:
@@ -431,6 +584,114 @@ def test_the_backdrop_follows_whether_the_key_colour_was_accepted(
         assert tk_root.cget("background") == expected
         if sys.platform == "win32":
             assert app.transparent
+    finally:
+        app.stop()
+
+
+def test_a_denser_display_is_drawn_in_more_pixels_not_larger_ones():
+    """The whole point of the scale factor: same design, more pixels.
+
+    Every length has to move together — a lamp that scaled while the housing did
+    not would simply not fit — so this compares the ratios rather than any one
+    number, and includes the fonts, which are what the housing is sized around.
+    """
+    single, double = _Layout(1.0), _Layout(2.0)
+    for name in (
+        "width",
+        "height",
+        "lamp_radius",
+        "lamp_pitch",
+        "housing_width",
+        "housing_height",
+        "close_radius",
+        "count_font_px",
+        "tokens_font_px",
+    ):
+        assert getattr(double, name) == pytest.approx(
+            2 * getattr(single, name), abs=2
+        ), name
+    # And the design itself is unchanged at 1.0: a lamp still sits inside its own
+    # tile, and the tiles still tile — neighbours must not overlap and clip each
+    # other's glow.
+    assert single.tile_half <= single.lamp_pitch / 2
+    assert single.lamp_radius < single.tile_half
+
+
+def test_the_close_button_clears_the_lamp_beside_it_and_the_corner_above_it():
+    """It is tucked into a corner, between two things it must not touch.
+
+    Both failures are silent and only visible on screen: overlapping the last
+    lamp hides part of the count, and straying outside the rounded corner puts
+    half the button on the keyed backdrop, where it is see-through.
+    """
+    layout = _Layout(1.0)
+    last = len(_LAMP_ORDER) - 1
+    from_lamp = math.dist(
+        (layout.close_center_x, layout.close_center_y),
+        (layout.lamp_center_x(last), layout.lamp_center_y),
+    )
+    assert from_lamp >= layout.lamp_radius + layout.close_radius
+
+    # The corner is an arc of `housing_radius` centred this far in from it; the
+    # button is inside the housing only while it stays inside that arc.
+    _left, _top, right, _bottom = layout.housing_box()
+    corner = (right - layout.housing_radius, layout.pad + layout.housing_radius)
+    from_corner = math.dist((layout.close_center_x, layout.close_center_y), corner)
+    assert from_corner + layout.close_radius <= layout.housing_radius
+
+
+def test_hidpi_awareness_is_only_claimed_where_it_exists():
+    """Windows hands out a stretched 96 dpi space until a process opts out.
+
+    Nowhere else needs it, and claiming it must not raise on a platform with no
+    such notion — the call sits on the path that opens the window.
+    """
+    taken = enable_hidpi()
+    assert isinstance(taken, bool)
+    if sys.platform != "win32":
+        assert taken is False
+
+
+@pytest.mark.parametrize("forced_scale", [None, 1.5, 2.0])
+def test_the_window_is_scaled_to_the_display_it_opened_on(
+    tmp_path, monkeypatch, tk_root, forced_scale
+):
+    """The canvas must be exactly the size the layout was computed for.
+
+    A mismatch is how a HiDPI rewrite goes wrong in practice: the drawing scales
+    and the widget it sits in does not, so the window silently clips it. The
+    denser scales are forced rather than waited for, because the machine this
+    runs on is almost always a plain 96 dpi one and the path would otherwise
+    never be executed at all.
+    """
+    _build_homes(tmp_path, monkeypatch)
+    if forced_scale is not None:
+        monkeypatch.setattr(
+            TrafficLightApp, "_display_scale", lambda _self: forced_scale
+        )
+    app = TrafficLightApp(tk_root, Monitor(), refresh_ms=50_000)
+    try:
+        app.refresh()
+        tk_root.update_idletasks()
+        if forced_scale is not None:
+            assert app._layout.scale == forced_scale
+        assert app._layout.scale >= 1.0
+        assert int(app._canvas.cget("width")) == app._layout.width
+        assert int(app._canvas.cget("height")) == app._layout.height
+        # Nothing may be drawn outside the canvas, which is the window.
+        x0, y0, x1, y1 = app._canvas.bbox("all")
+        assert x0 >= 0 and y0 >= 0
+        assert x1 <= app._layout.width and y1 <= app._layout.height
+        # And the lamp colours still read back exactly, so the pixel the count
+        # is judged against is the state's own colour at every density.
+        lamps = app.lamps()
+        for state in _LAMP_ORDER:
+            expected = (
+                STATE_COLORS[state]
+                if lamps[state]["text"] != "0"
+                else _UNLIT_COLORS[state]
+            )
+            assert lamps[state]["fill"] == expected, state
     finally:
         app.stop()
 

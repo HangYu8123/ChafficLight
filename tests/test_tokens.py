@@ -12,10 +12,39 @@ from cli_traffic_light.tokens import (
     TokenUsage,
     claude_usage_from_record,
     codex_usage_from_total,
+    growth,
     tokens_per_second,
 )
 
 NOW = 1_753_700_000.0
+
+
+def test_growth_reports_the_rise_in_every_count():
+    rise = growth(TokenUsage(10, 5, 2, 1), TokenUsage(30, 6, 2, 100))
+    assert (rise.input_tokens, rise.output_tokens) == (20, 1)
+    assert (rise.cache_creation_tokens, rise.cache_read_tokens) == (0, 99)
+    assert rise.total_tokens == 21
+
+
+def test_growth_clamps_each_count_rather_than_the_total():
+    """A rewritten transcript makes a cumulative count fall.
+
+    Clamped per field, so a count that dropped contributes zero instead of
+    cancelling out a different one that really rose — which is what clamping the
+    billable total alone would do.
+    """
+    rise = growth(TokenUsage(100, 5, 0, 0), TokenUsage(0, 9, 0, 0))
+    assert rise.input_tokens == 0
+    assert rise.output_tokens == 4
+    assert rise.total_tokens == 4
+
+
+def test_growth_leaves_both_readings_untouched():
+    """One of them is the running total the monitor keeps between snapshots."""
+    earlier, later = TokenUsage(1, 2, 3, 4), TokenUsage(5, 6, 7, 8)
+    growth(earlier, later)
+    assert earlier == TokenUsage(1, 2, 3, 4)
+    assert later == TokenUsage(5, 6, 7, 8)
 
 
 @pytest.mark.parametrize(
@@ -91,34 +120,51 @@ def test_codex_total_counts_cache_writes_as_cache_creation():
     assert usage.total_tokens == 950
 
 
-def test_tokens_per_second_clamps_a_counter_reset_to_zero():
-    samples = [(NOW - 20.0, 1_000), (NOW - 10.0, 300), (NOW, 900)]
-    assert tokens_per_second(samples, NOW) == pytest.approx(600.0 / 20.0)
+def test_tokens_per_second_is_only_the_newest_step():
+    """The request this froze: the rate must read now, not the last minute.
+
+    Two steps, and only the newest one counts — 300 tokens over the 30 s since
+    the step began. Averaging both in would drag in the 100 from two minutes ago
+    and report 400/110 instead.
+    """
+    samples = [(NOW - 120.0, 0), (NOW - 30.0, 100), (NOW - 10.0, 400)]
+    assert tokens_per_second(samples, NOW) == pytest.approx(300.0 / 30.0)
+
+
+def test_tokens_per_second_ignores_history_however_long():
+    """Everything before the newest step is irrelevant, so it cannot move the rate."""
+    newest = [(NOW - 30.0, 100), (NOW - 10.0, 400)]
+    assert tokens_per_second([(NOW - 5_000.0, 0)] + newest, NOW) == pytest.approx(
+        tokens_per_second(newest, NOW)
+    )
+
+
+def test_tokens_per_second_skips_a_counter_reset_to_reach_the_real_step():
+    """A reset is a step that lost tokens; it is skipped, not counted as zero.
+
+    The counters reset on session resume and context compaction, and a reset
+    landing as the newest step would otherwise blank the rate of a session that
+    is still running.
+    """
+    samples = [(NOW - 20.0, 0), (NOW - 10.0, 1_000), (NOW, 300)]
+    assert tokens_per_second(samples, NOW) == pytest.approx(1_000.0 / 20.0)
 
 
 def test_tokens_per_second_is_not_last_minus_first():
     samples = [(NOW - 20.0, 1_000), (NOW - 10.0, 300), (NOW, 900)]
     rate = tokens_per_second(samples, NOW)
-    assert rate == pytest.approx(30.0)
+    assert rate == pytest.approx(600.0 / 10.0)
     assert rate != pytest.approx((900 - 1_000) / 20.0)
 
 
-def test_tokens_per_second_divides_by_the_whole_window_not_the_sample_span():
-    """A pre-window sample is a baseline for the step that lands in the window.
+def test_tokens_per_second_uses_the_step_span_when_it_ends_ahead_of_now():
+    """The CLI's clock can read a shade ahead of ours; the step still counts.
 
-    The step onto 100 was *reported* at NOW-30, inside the window, so its tokens
-    count even though the sample it is measured against has aged out. Both steps
-    are then spread over the full 60 s, not over the 20 s their two timestamps
-    happen to span.
+    Dividing by ``now - start`` alone would report a rate for a step that has
+    not finished yet, or a negative span — for the one step the widget most
+    needs to show, the one that just landed.
     """
-    samples = [(NOW - 120.0, 0), (NOW - 30.0, 100), (NOW - 10.0, 400)]
-    assert tokens_per_second(samples, NOW) == pytest.approx(400.0 / 60.0)
-
-
-def test_tokens_per_second_widening_the_window_lengthens_the_divisor():
-    """Same tokens, longer window: the rate falls because more idle time counts."""
-    samples = [(NOW - 120.0, 0), (NOW - 30.0, 100), (NOW - 10.0, 400)]
-    assert tokens_per_second(samples, NOW, window=300) == pytest.approx(400.0 / 120.0)
+    assert tokens_per_second([(NOW - 2.0, 0), (NOW + 1.0, 300)], NOW) == pytest.approx(100.0)
 
 
 def test_tokens_per_second_decays_as_a_finished_burst_recedes():
@@ -153,17 +199,17 @@ def test_tokens_per_second_counts_silence_since_the_last_sample():
     [
         [],
         [(NOW, 500)],
-        [(NOW - 1_000.0, 10), (NOW - 900.0, 20)],
+        [(NOW - 20.0, 500), (NOW - 10.0, 500), (NOW, 500)],
     ],
 )
-def test_tokens_per_second_is_zero_without_two_in_window_samples(samples):
+def test_tokens_per_second_is_zero_without_a_step_that_gained(samples):
     assert tokens_per_second(samples, NOW) == 0.0
 
 
-def test_tokens_per_second_is_zero_when_the_window_span_is_zero():
+def test_tokens_per_second_is_zero_when_the_step_span_is_zero():
     assert tokens_per_second([(NOW, 10), (NOW, 90)], NOW) == 0.0
 
 
 def test_tokens_per_second_over_a_monotonic_series():
     samples = [(NOW - 40.0, 0), (NOW - 20.0, 200), (NOW, 600)]
-    assert tokens_per_second(samples, NOW) == pytest.approx(15.0)
+    assert tokens_per_second(samples, NOW) == pytest.approx(20.0)

@@ -36,19 +36,19 @@ def test_claude_status_maps_to_expected_state(status, expected):
 
 
 def test_waiting_is_the_only_claude_status_that_needs_input():
-    """Red means the agent asked something — nothing else may claim it.
+    """Yellow means the agent asked something — nothing else may claim it.
 
     Asserted against the mapping table rather than a list of statuses spelled
     out here, so a *future* status wired to NEEDS_INPUT fails this too: the
-    guarantee is "exactly one status is red", not "these five are not".
+    guarantee is "exactly one status is yellow", not "these five are not".
     """
     assert claude_status_to_state("waiting") == SessionState.NEEDS_INPUT
-    red = [
+    yellow = [
         status
         for status, state in _CLAUDE_STATUS_STATES.items()
         if state is SessionState.NEEDS_INPUT
     ]
-    assert red == ["waiting"]
+    assert yellow == ["waiting"]
 
 
 def test_every_state_has_a_colour():
@@ -63,9 +63,9 @@ def test_each_signal_colour_means_what_the_light_says():
     because the requirement *is* the specific colour: an assertion that reads
     the value it is checking would hold whatever the table said.
     """
-    assert STATE_COLORS[SessionState.RUNNING] == "#2ecc40"      # go, nothing wanted
-    assert STATE_COLORS[SessionState.NEEDS_INPUT] == "#ff4136"  # stop, answer it
-    assert STATE_COLORS[SessionState.IDLE] == "#ffdc00"         # done, awaiting a prompt
+    assert STATE_COLORS[SessionState.RUNNING] == "#2ecc40"      # moving, nothing wanted
+    assert STATE_COLORS[SessionState.NEEDS_INPUT] == "#ffdc00"  # your attention, answer it
+    assert STATE_COLORS[SessionState.IDLE] == "#ff4136"         # stopped, awaiting a prompt
 
 
 def test_states_that_are_not_a_signal_do_not_borrow_a_signal_colour():

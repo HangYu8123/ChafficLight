@@ -8,17 +8,26 @@ the same three lamps, and the number inside a lamp is how many sessions are in t
 | Lamp | Meaning |
 |---|---|
 | 🟢 green | running — the agent is working and wants nothing from you |
-| 🔴 red | needs input — the agent **asked you something** and cannot continue until you answer |
-| 🟡 yellow | idle — the turn is over; the session is alive and waiting for your next prompt |
+| 🟡 yellow ✨ | needs input — the agent **asked you something** and cannot continue until you answer. **This lamp flashes.** |
+| 🔴 red | done — the turn is over; the session is alive and waiting for your next prompt |
 
-The lamps read the way a road signal does, from the driver's seat: **green** you may carry
-on, **red** you must stop and act before anything moves again, **yellow** the turn is over
-and the session is holding. So the colour tracks *what you have to do*, not how bad things
-are.
+The lamps read the way a road signal does, but from the *session's* seat rather than the
+driver's: **green** it is moving, **yellow** slow down and give it your attention, **red**
+it has stopped and nothing moves again until you type. So the colour tracks how much is
+still happening on its own — and yellow, the one colour that means *act* on a road, is the
+one that actually wants you.
 
-Red is deliberately narrow. It means a permission prompt, a question or another dialog is
-open on that session right now — nothing else earns it, so a red light always means *go and
-answer it*. A session that merely finished its turn is yellow, not red.
+Yellow is deliberately narrow. It means a permission prompt, a question or another dialog
+is open on that session right now — nothing else earns it, so a yellow light always means
+*go and answer it*. A session that merely finished its turn is red, not yellow.
+
+**Yellow is also the only lamp that flashes**, twice a second for as long as its count is
+not zero, and it comes on lit rather than dark so it is yellow the instant a session starts
+waiting. It is the one state that is actually blocking — a red session has merely stopped
+and can be left — and motion is what peripheral vision picks up, where a lamp sitting
+steady beside two other steady lamps is easy to leave unnoticed. Green and red stay steady
+for the same reason: everything flashing would be the same as nothing flashing. The count
+stays readable through both halves of the blink.
 
 The light carries only the sessions you can still act on. One that has **ended**, or whose
 status this build does not recognise, is not on the face at all: there is nothing to do
@@ -30,10 +39,25 @@ hours**. A session with no session-file update, no transcript record and no roll
 in a day is history rather than work in progress, and reading every transcript ever
 written is what made a snapshot take seconds.
 
-The window is a small always-on-top widget with no title bar and a transparent backdrop: a
-horizontal signal face, the session count inside each lamp, and the total token usage and
-tokens/sec underneath. Drag it anywhere by the light itself; the ✕ in its corner (or `Esc`)
-closes it. The per-session detail, including **VS Code integrated terminal** detection, is
+The window is a small always-on-top widget with no title bar and a transparent background:
+what floats on the desktop is the signal housing itself — a horizontal face, the session
+count inside each lamp, and the token usage and tokens/sec underneath it. A lit lamp
+glows onto the case around it, which is the cue that survives being seen out of the corner
+of an eye. Drag it anywhere by the light itself; the ✕ in its corner (or `Esc`) closes it.
+
+**The token figure resets every time the app starts.** It counts what has been spent since
+the window opened, not what the transcripts on disk add up to — both CLIs count
+cumulatively and keep a day of history, so the face would otherwise open at yesterday's
+number. It is accumulated per session and only ever upward, so a session ending, being
+deleted, or aging out does not take its tokens back out of the figure, and a transcript
+that is truncated or rewritten contributes nothing rather than a negative. `--once` and
+`--once --json` still report the **lifetime** totals: that process takes a single snapshot,
+so a since-start figure there would be nothing but zeroes.
+
+Everything with an edge is drawn by Pillow at three times the final size and scaled back
+down, because the Tk canvas does not antialias its own shapes; the text stays Tk's, which
+does. On Windows the app declares itself DPI-aware and picks up the display's real pixel
+density, so a 150% screen is drawn in more pixels rather than the same ones stretched. The per-session detail, including **VS Code integrated terminal** detection, is
 in `--once` / `--once --json`.
 
 The monitor is **strictly read-only** toward the CLIs' state directories. It never writes to
@@ -45,7 +69,9 @@ them, never opens Codex's live SQLite database, and never signals another proces
   separately on some systems — `sudo apt install python3-tk` on Debian/Ubuntu,
   `brew install python-tk` on macOS. `pip install tk` is an unrelated package and does
   not help.
-- [`psutil`](https://pypi.org/project/psutil/) — installed for you by the commands below
+- [`psutil`](https://pypi.org/project/psutil/) and
+  [`Pillow`](https://pypi.org/project/pillow/) — installed for you by the commands below.
+  Pillow draws the window; the headless `--once` modes never import it.
 - Linux, macOS or Windows
 - A desktop session for the GUI (X11/Wayland on Linux); the `--once` modes are headless
 
@@ -166,8 +192,8 @@ cross-compiler, so it only ever builds for the machine it runs on; the
 artifact it builds rather than only uploading it.
 
 The app icon is the single `cli_traffic_light/chafficlight.png`. Windows and macOS
-executables embed it — Pillow, part of the `build` extra, converts it to `.ico` and
-`.icns` during the build — so replacing the icon means replacing that one file and
+executables embed it — Pillow, which the app already depends on, converts it to `.ico`
+and `.icns` during the build — so replacing the icon means replacing that one file and
 nothing else. It has no alpha channel today, so it renders as a full square rather than
 a shaped mark; an RGBA image drops in without any code change.
 
@@ -255,8 +281,12 @@ The two CLIs report cache tokens differently, so they are normalised differently
   reads run ~40× the headline number, so including them would be meaningless.
 - **Codex** — `cached_input_tokens` is a *subset of* `input_tokens`, so it is subtracted
   back out: `total = input − cached + cache_write + output`.
-- **tokens/sec** is a sliding 60-second window over clamped non-negative deltas — never
-  `last − first`, because the counters reset on session resume and context compaction.
+- **tokens/sec** is the **newest step only** — what the latest reading added, over the
+  time from the reading before it to now. Not an average of the last minute: neither CLI
+  reports usage while a message is in flight (Claude writes one record per completed
+  message, Codex a `token_count` event every few seconds), so a single step is as live as
+  the data gets. Never `last − first`, and a step that *lost* tokens is skipped rather
+  than counted, because the counters reset on session resume and context compaction.
 
 Cache-read counts are still reported separately, per session and in the totals.
 
@@ -311,9 +341,18 @@ reader uses, so the fixture cannot drift from the platform's own format.
   equally `FindPapers\.github` and `FindPapers\-github`.
 - On Windows the pid-reuse guard matches within 1 ms rather than exactly, so a pid reused
   by a process started inside that window would not be caught.
-- `tokens/sec` reads `0.0` for a session billed fewer than twice within the 60-second window.
-- The transparent backdrop uses `-transparentcolor`, which Tk documents as **Windows-only**.
-  macOS and Linux fall back to an opaque dark window; everything else is identical.
+- `tokens/sec` reads `0.0` for a session billed fewer than twice — one step needs two
+  readings — and it is a live figure, not a smoothed one: it jumps when a record lands and
+  decays while nothing new does, since the divisor keeps growing with the silence.
+- The transparent background uses `-transparentcolor`, which Tk documents as
+  **Windows-only**. macOS and Linux fall back to an opaque dark window; everything else is
+  identical. The window is also drawn at 94% opacity where a compositor honours `-alpha`,
+  which an X11 session without one simply ignores.
+- Colour-keying is exact, so the antialiased rim of the housing and the soft shadow under
+  it are *not* keyed out — they are near-black pixels that read as a shadow on a dark
+  desktop and as a shadow on a light one, but they are opaque either way.
+- DPI awareness is taken once, before the window exists, and per-monitor: dragging the
+  widget onto a second screen of a different density does not redraw it at that density.
 - The widget is undecorated, so it has no taskbar entry and the window manager cannot close
   it. The ✕ and `Esc` are the only ways out, and the transparent area is click-through on
   Windows — so drag it by the light, not by the space around it.
@@ -322,20 +361,20 @@ reader uses, so the fixture cannot drift from the platform's own format.
   changed, but still stat every transcript and read each live session's environment through
   `psutil`. On the development machine, with 9 sessions, that is ~1.2 s once and ~0.26 s per
   refresh after.
-- **Codex sessions can never show red.** Codex's rollout writer filters approval and
+- **Codex sessions can never show yellow.** Codex's rollout writer filters approval and
   elicitation events out before the file is written, so nothing on disk says a Codex session
   is blocked on you. A Codex session sitting on an approval prompt therefore reads green
   until 15 minutes of mtime staleness make it `finished` and drop it off the light. The only
   signal that would fix this is Codex's push-based `notify` hook, which needs config and a
   writer process — it would cost this app its read-only, zero-config property, so it was not
-  taken. **Red is a Claude-only light**: treat a green Codex session that has not moved in a
-  while as worth a look.
+  taken. **Yellow is a Claude-only light**, and so is the flash: treat a green Codex session
+  that has not moved in a while as worth a look.
 - **`finished` means different things per CLI, and it leaves the light.** For Claude it is a
   transcript whose process is gone. For Codex nothing records that a session ended, so it is
   only "no rollout write for 15 minutes" — a Codex chat you left alone becomes `finished`
-  and disappears from the face while it is still sitting at its prompt, where yellow would
+  and disappears from the face while it is still sitting at its prompt, where red would
   describe it better. Use `--once` to see it.
-- A Claude session only reaches red if its pid passes the `procStart` liveness check
+- A Claude session only reaches yellow if its pid passes the `procStart` liveness check
   first, so a false negative there hides the light rather than showing a wrong one.
 - The downloadable builds are **unsigned**, so Windows SmartScreen and macOS Gatekeeper
   both warn on first launch (see *Download the app*). Signing needs a code-signing

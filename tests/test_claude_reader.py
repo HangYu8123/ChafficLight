@@ -284,11 +284,11 @@ def test_missing_proc_start_never_forces_finished(tmp_path, monkeypatch):
 
 
 def test_waiting_session_needs_input(tmp_path, monkeypatch):
-    """A live session with a dialog open is the one thing that earns red.
+    """A live session with a dialog open is the one thing that earns yellow.
 
     ``waiting`` is what the CLI was observed writing while a prompt was on
     screen — ``{"status": "waiting", "waitingFor": "input needed", ...}`` — so
-    this pins the whole path from that record to the red light.
+    this pins the whole path from that record to the flashing yellow light.
     """
     home = tmp_path / "claude_home_waiting"
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home))

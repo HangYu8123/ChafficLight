@@ -143,8 +143,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     # Imported here so the headless path never loads the GUI module.
-    from .gui import TrafficLightApp
+    from .gui import TrafficLightApp, enable_hidpi
 
+    # Before the first window exists: Windows fixes a window's DPI awareness when
+    # it is created, and an unaware one is drawn at 96 dpi and then stretched.
+    enable_hidpi()
     root = tk.Tk()
     app = TrafficLightApp(root, monitor)
     app.refresh()

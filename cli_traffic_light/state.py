@@ -41,15 +41,17 @@ class SessionState(str, Enum):
     UNKNOWN = "unknown"
 
 
-#: The signal reads the way a road signal does, from the driver's point of view:
-#: green you may proceed and nothing is wanted from you, red you must stop and
-#: act before anything moves again, yellow the turn is over and the session is
-#: holding. The colour tracks *what the user has to do*, not how severe the state
-#: is — so a session that merely ended is none of the three and takes blue.
+#: The signal reads the way a road signal does, from the *session's* point of
+#: view rather than the driver's: green it is moving, yellow slow down and give
+#: it your attention because it has asked you something, red it has stopped —
+#: the turn is over and nothing moves again until you type. So the colour tracks
+#: how much is still happening on its own, and yellow — the one colour that
+#: means "act" on a road — is the one that wants you. A session that has ended
+#: is none of the three and takes blue.
 STATE_COLORS: dict[SessionState, str] = {
     SessionState.RUNNING: "#2ecc40",
-    SessionState.NEEDS_INPUT: "#ff4136",
-    SessionState.IDLE: "#ffdc00",
+    SessionState.NEEDS_INPUT: "#ffdc00",
+    SessionState.IDLE: "#ff4136",
     SessionState.FINISHED: "#3498db",
     SessionState.UNKNOWN: "#aaaaaa",
 }

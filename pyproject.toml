@@ -7,7 +7,9 @@ name = "chafficlight"
 description = "Traffic-light monitor for Claude Code CLI and Codex CLI chat sessions."
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = ["psutil"]
+# Pillow draws the window: the Tk canvas does not antialias, so every shape is
+# rendered oversampled and scaled down instead of drawn as a canvas item.
+dependencies = ["psutil", "pillow"]
 dynamic = ["version"]
 
 [project.optional-dependencies]

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import replace
 from pathlib import Path
 
 import psutil
@@ -17,7 +18,7 @@ import psutil
 from .claude import ClaudeReader
 from .codex import CodexReader
 from .state import Session
-from .tokens import TokenUsage
+from .tokens import TokenUsage, growth
 from .vscode import detect_vscode
 
 __all__ = ["Monitor"]
@@ -104,6 +105,13 @@ class Monitor:
         # One reader, so the sessions and the subagent aggregate share its
         # per-transcript parse cache instead of each re-reading every file.
         self._claude = ClaudeReader(self.claude_home)
+        # Both CLIs count tokens cumulatively and for as long as a transcript
+        # survives, so "used since this monitor was created" has to be built up
+        # here: the last count seen for each session, and the running sum of
+        # every rise in one. See `_accumulate`.
+        self._seen: dict[tuple[str, str], TokenUsage] = {}
+        self._since_start = TokenUsage()
+        self._baselined = False
 
     def snapshot(self) -> list[Session]:
         """Every currently visible session from both CLIs."""
@@ -112,19 +120,63 @@ class Monitor:
         ide_locks = _ide_locks(self.claude_home)
         for session in sessions:
             _add_vscode_detection(session, ide_locks)
+        self._accumulate(sessions)
         self._latest = sessions
         return sessions
+
+    def _accumulate(self, sessions: list[Session]) -> None:
+        """Fold this snapshot's token growth into the since-start total.
+
+        Counted per session and only upward, which is what makes the figure
+        monotonic. Summing the visible sessions and subtracting a starting
+        figure would not be: sessions end, and drop off the snapshot 24 hours
+        later, and the total would then walk *backwards* past work that was
+        genuinely done — eventually to zero, on a widget left open for a day.
+
+        Everything already running when the first snapshot is taken is recorded
+        without being counted, so the total reads "since this monitor was
+        created" rather than "since these sessions began". Anything first seen
+        after that started after it too, and counts in full.
+        """
+        for session in sessions:
+            # Keyed by CLI as well as id: nothing stops the two from minting the
+            # same session id, and one shadowing the other would drop its tokens.
+            key = (session.agent, session.session_id)
+            previous = self._seen.get(key)
+            if previous is not None:
+                self._since_start.add(growth(previous, session.usage))
+            elif self._baselined:
+                self._since_start.add(session.usage)
+            # Copied, because the reader owns that object and `add` mutates.
+            self._seen[key] = replace(session.usage)
+        self._baselined = True
 
     def subagent_totals(self) -> TokenUsage:
         """Claude subagent token usage, aggregated apart from the session totals."""
         return self._claude.subagent_token_total()
 
     def totals(self) -> TokenUsage:
-        """Token usage summed across the sessions in the latest snapshot."""
+        """Token usage summed across the sessions in the latest snapshot.
+
+        The lifetime figure, counting everything each visible session has ever
+        spent. `totals_since_start` is the one the window shows; this one is what
+        ``--once`` reports, where a since-start total would be nothing but zeroes
+        because the process only ever takes one snapshot.
+        """
         if self._latest is None:
             self.snapshot()
         total = TokenUsage()
         for session in self._latest:
             total.add(session.usage)
         return total
+
+    def totals_since_start(self) -> TokenUsage:
+        """Token usage accrued since this monitor was created.
+
+        A copy: the caller must not be able to add to the running total through
+        the object it is handed.
+        """
+        if self._latest is None:
+            self.snapshot()
+        return replace(self._since_start)
 
