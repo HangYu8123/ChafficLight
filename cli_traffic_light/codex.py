@@ -14,29 +14,12 @@ from pathlib import Path
 
 from .jsonl import parse_iso, read_jsonl
 from .state import Session, SessionState, codex_events_to_state, is_stale
-from .tokens import TokenUsage, codex_usage_from_total
+from .tokens import TokenUsage, codex_usage_from_total, observed_output_rate
 
 __all__ = ["CodexReader"]
 
 #: Rollout events that mark a turn boundary; the last one seen drives the state.
 _TURN_EVENTS = ("task_started", "task_complete", "turn_aborted")
-
-
-def _observed_output_rate(samples: list[tuple[float, int]]) -> float | None:
-    """Latest observed output-token delta per second, if one is measurable.
-
-    Codex's token-count events are cumulative snapshots, not token emission
-    timestamps. Their interval therefore supports an observed output throughput,
-    not a claim about the model's decode speed. Sorting here keeps out-of-order
-    records from changing either the interval or its sign.
-    """
-    latest = None
-    ordered = sorted(samples)
-    for (start, earlier), (end, later) in zip(ordered, ordered[1:]):
-        elapsed = end - start
-        if elapsed > 0 and later > earlier:
-            latest = (later - earlier) / elapsed
-    return latest
 
 
 def _scan_events(records: list[dict]) -> tuple[str | None, TokenUsage, list[tuple[float, int]]]:
@@ -120,7 +103,7 @@ class CodexReader:
         session_id = meta.get("session_id")
         state = codex_events_to_state(last_turn_event, mtime, now)
         if state is SessionState.RUNNING:
-            rate = _observed_output_rate(rate_samples)
+            rate = observed_output_rate(rate_samples)
         elif state is SessionState.UNKNOWN:
             rate = None
         else:

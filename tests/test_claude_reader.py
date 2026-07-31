@@ -55,6 +55,17 @@ def _assistant(epoch, message_id, request_id, usage, is_sidechain=False) -> dict
     }
 
 
+def _prompt(epoch, prompt_id, is_sidechain=False) -> dict:
+    """A user record, which is what carries the id of the turn it belongs to."""
+    return {
+        "type": "user",
+        "isSidechain": is_sidechain,
+        "promptId": prompt_id,
+        "timestamp": _iso(epoch),
+        "message": {"role": "user", "content": "go on"},
+    }
+
+
 def _write_jsonl(path: Path, records) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
@@ -189,21 +200,79 @@ def test_session_name_surfaces_as_the_title(tmp_path, monkeypatch):
     assert live.title == "live one"
 
 
-def test_running_rate_is_unknown_even_with_main_and_delegated_usage(
-    tmp_path, monkeypatch
-):
-    """Completion timestamps do not bound generation or delegated work.
+def test_running_rate_measures_the_main_thread_only(tmp_path, monkeypatch):
+    """The latest main-thread interval sets the rate; delegated work does not.
 
-    The two main records, sidechain record, and subagent transcript make this
-    non-vacuous: the reader has plenty of token counts, but no generation
-    duration with which to turn any of them into output tokens per second.
+    The sidechain record and subagent transcript make this non-vacuous: both
+    carry far more output tokens than the main thread, so either leaking into
+    the series would show up plainly. Only ``msg-a``→``msg-b`` counts, which is
+    30 output tokens across the 20 seconds between them.
     """
     home = _build_home(tmp_path)
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home))
     live = _by_id(ClaudeReader(home, now=lambda: NOW).read_sessions())["sess-live"]
     assert live.usage.total_tokens == 355
     assert ClaudeReader(home, now=lambda: NOW).subagent_token_total().total_tokens == 1_415
+    assert live.tokens_per_sec == pytest.approx(1.5)
+
+
+def test_running_rate_is_unknown_until_a_turn_has_two_messages(tmp_path, monkeypatch):
+    """One message into a turn there is no interval yet, and none is invented."""
+    home = _build_home(tmp_path)
+    _write_jsonl(
+        home / "projects" / "-work-live" / "sess-live.jsonl",
+        [_assistant(NOW - 20, "msg-a", "req-a", _usage(100, 20, 5, 900))],
+    )
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home))
+    live = _by_id(ClaudeReader(home, now=lambda: NOW).read_sessions())["sess-live"]
+    assert live.state is SessionState.RUNNING
     assert live.tokens_per_sec is None
+
+
+def test_running_rate_restarts_at_a_turn_boundary(tmp_path, monkeypatch):
+    """The user's own thinking time never becomes the denominator.
+
+    ``msg-b`` opens a new turn 10 minutes after ``msg-a`` closed the last one.
+    Dividing by that wait would report a rate an order of magnitude too low, so
+    the new turn is not measurable until its own second message lands.
+    """
+    home = _build_home(tmp_path)
+    _write_jsonl(
+        home / "projects" / "-work-live" / "sess-live.jsonl",
+        [
+            _prompt(NOW - 640, "turn-1"),
+            _assistant(NOW - 630, "msg-a", "req-a", _usage(100, 20)),
+            _prompt(NOW - 30, "turn-2"),
+            _assistant(NOW - 20, "msg-b", "req-b", _usage(100, 300)),
+        ],
+    )
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home))
+    live = _by_id(ClaudeReader(home, now=lambda: NOW).read_sessions())["sess-live"]
+    assert live.tokens_per_sec is None
+
+
+def test_running_rate_counts_a_split_message_once(tmp_path, monkeypatch):
+    """One message is several records, each repeating the whole message's usage.
+
+    Counting per record would triple ``msg-b``'s 30 tokens. Its last block also
+    sets the end of the interval, because a block's record is written when that
+    block finishes being generated: 30 tokens over the 30 seconds from ``msg-a``.
+    """
+    home = _build_home(tmp_path)
+    _write_jsonl(
+        home / "projects" / "-work-live" / "sess-live.jsonl",
+        [
+            _prompt(NOW - 60, "turn-1"),
+            _assistant(NOW - 50, "msg-a", "req-a", _usage(100, 20)),
+            _assistant(NOW - 30, "msg-b", "req-b", _usage(200, 30)),
+            _assistant(NOW - 25, "msg-b", "req-b", _usage(200, 30)),
+            _assistant(NOW - 20, "msg-b", "req-b", _usage(200, 30)),
+        ],
+    )
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home))
+    live = _by_id(ClaudeReader(home, now=lambda: NOW).read_sessions())["sess-live"]
+    assert live.usage.total_tokens == 350
+    assert live.tokens_per_sec == pytest.approx(1.0)
 
 
 def test_non_running_claude_rate_is_exactly_zero(tmp_path, monkeypatch):

@@ -859,20 +859,25 @@ class TrafficLightApp:
         self._canvas.itemconfig(
             self._tokens_text, text=f"{totals.total_tokens:,} tokens"
         )
-        # A rate is addable only when every running session has one. Claude's
-        # transcript records token counts at completion but no generation
-        # interval, so treating its unknown contribution as zero would print a
-        # plausible-looking partial total while its green lamp is lit.
+        # A session that has only just been prompted has generated one message
+        # and so has no interval to measure yet. That is normal mid-turn and
+        # short-lived, so it is left out of the sum rather than blanking a
+        # figure the other running sessions can still account for; the dash is
+        # kept for when not one of them has a measurable pace.
         running = [
             session for session in sessions if session.state is SessionState.RUNNING
         ]
+        measured = [
+            session.tokens_per_sec
+            for session in running
+            if session.tokens_per_sec is not None
+        ]
         if not running:
             rate_text = "0.0 tok/s"
-        elif any(session.tokens_per_sec is None for session in running):
+        elif not measured:
             rate_text = "— tok/s"
         else:
-            rate = sum(session.tokens_per_sec for session in running)
-            rate_text = f"{rate:.1f} tok/s"
+            rate_text = f"{sum(measured):.1f} tok/s"
         self._canvas.itemconfig(self._rate_text, text=rate_text)
         # The one figure the bar keeps: minimized, the latest observable output
         # pace remains useful while the running total can wait for the full face.

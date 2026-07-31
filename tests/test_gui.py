@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 from cli_traffic_light.claude import _default_proc_info
+from cli_traffic_light.jsonl import parse_iso
 from cli_traffic_light.gui import (
     _CLOSE_DRAG_SLOP,
     _CLOSE_FILL_COLOR,
@@ -537,9 +538,11 @@ def test_token_total_and_rate_are_shown_under_the_light(tmp_path, monkeypatch, t
 
         # A second billed record 10 s after the first, so the rate is a real
         # non-zero number too: asserting only 0.0 would pass just as well if the
-        # rate were hardcoded or the sum dropped a term.
-        now = time.time()
+        # rate were hardcoded or the sum dropped a term. Timed off the record
+        # already on disk rather than the clock, so that however long building
+        # the app took does not widen the interval being asserted.
         transcript = claude_home / "projects" / "-work-gui" / "gui-sess.jsonl"
+        first = parse_iso(json.loads(transcript.read_text())["timestamp"])
         with transcript.open("a", encoding="utf-8") as handle:
             handle.write(
                 json.dumps(
@@ -547,7 +550,7 @@ def test_token_total_and_rate_are_shown_under_the_light(tmp_path, monkeypatch, t
                         "type": "assistant",
                         "isSidechain": False,
                         "requestId": "req-gui-2",
-                        "timestamp": _iso(now - 20),
+                        "timestamp": _iso(first + 10),
                         "message": {
                             "id": "msg-gui-2",
                             "role": "assistant",
@@ -563,16 +566,15 @@ def test_token_total_and_rate_are_shown_under_the_light(tmp_path, monkeypatch, t
         # Only the 80 + 20 that arrived while the window was open, not the
         # 100 + 20 + 5 that was already there.
         assert stats["tokens"] == "100 tokens"
-        # Claude's completion-stamped records do not reveal how long either
-        # response spent generating, so the rate is unknown rather than a
-        # billing-total delta divided by the gap between them.
-        assert stats["rate"] == "— tok/s"
+        # The two records are 10 s apart and the second is worth 20 output
+        # tokens, so the latest observable interval is 2.0 tok/s.
+        assert stats["rate"] == "2.0 tok/s"
     finally:
         app.stop()
 
 
 def test_rate_distinguishes_zero_observed_and_unknown(tmp_path, monkeypatch, tk_root):
-    """Zero is reserved for no running work; missing telemetry is an em dash."""
+    """Zero is reserved for no running work; nothing measurable yet is an em dash."""
     claude_home = _build_homes(tmp_path, monkeypatch)
     _write_session_file(claude_home, "idle")
 
@@ -584,20 +586,61 @@ def test_rate_distinguishes_zero_observed_and_unknown(tmp_path, monkeypatch, tk_
         assert app.lamps()[SessionState.RUNNING]["text"] == "0"
         assert app.stats()["rate"] == "0.0 tok/s"
 
-        # A provider with two timed cumulative output samples is measurable.
-        _add_running_codex_session(tmp_path / "codex_home")
-        app.refresh()
-        tk_root.update_idletasks()
-        assert app.lamps()[SessionState.RUNNING]["text"] == "1"
-        assert app.stats()["rate"] == "3.0 tok/s"
-
-        # Adding running Claude work makes the aggregate unknown. Printing the
-        # Codex term alone would silently count Claude as zero.
+        # One running session, one message into its turn: an interval needs two
+        # readings, so there is nothing to divide yet. Zero would be a lie here
+        # — the green lamp is lit and tokens are being generated.
         _write_session_file(claude_home, "busy")
         app.refresh()
         tk_root.update_idletasks()
-        assert app.lamps()[SessionState.RUNNING]["text"] == "2"
+        assert app.lamps()[SessionState.RUNNING]["text"] == "1"
         assert app.stats()["rate"] == "— tok/s"
+
+        # A second running session that *is* measurable carries the figure. The
+        # session still short of an interval is left out rather than blanking
+        # what the other one can account for.
+        _add_running_codex_session(tmp_path / "codex_home")
+        app.refresh()
+        tk_root.update_idletasks()
+        assert app.lamps()[SessionState.RUNNING]["text"] == "2"
+        assert app.stats()["rate"] == "3.0 tok/s"
+    finally:
+        app.stop()
+
+
+def test_rate_sums_every_measurable_running_session(tmp_path, monkeypatch, tk_root):
+    """Both CLIs contribute to one figure, by the same observed-interval rule."""
+    claude_home = _build_homes(tmp_path, monkeypatch)
+    _add_running_codex_session(tmp_path / "codex_home")
+
+    # A second Claude record 10 s after the fixture's first, worth 20 output
+    # tokens: 2.0 tok/s of Claude on top of the 3.0 tok/s of Codex. Timed off
+    # the record already on disk, not the clock, so the interval is exact.
+    transcript = claude_home / "projects" / "-work-gui" / "gui-sess.jsonl"
+    first = parse_iso(json.loads(transcript.read_text())["timestamp"])
+    with transcript.open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "isSidechain": False,
+                    "requestId": "req-gui-2",
+                    "timestamp": _iso(first + 10),
+                    "message": {
+                        "id": "msg-gui-2",
+                        "role": "assistant",
+                        "usage": {"input_tokens": 80, "output_tokens": 20},
+                    },
+                }
+            )
+            + "\n"
+        )
+
+    app = TrafficLightApp(tk_root, Monitor(), refresh_ms=50_000)
+    try:
+        app.refresh()
+        tk_root.update_idletasks()
+        assert app.lamps()[SessionState.RUNNING]["text"] == "2"
+        assert app.stats()["rate"] == "5.0 tok/s"
     finally:
         app.stop()
 

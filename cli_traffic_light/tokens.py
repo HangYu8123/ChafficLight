@@ -16,7 +16,31 @@ __all__ = [
     "claude_usage_from_record",
     "codex_usage_from_total",
     "growth",
+    "observed_output_rate",
 ]
+
+
+def observed_output_rate(samples: list[tuple[float, int]]) -> float | None:
+    """Latest observed output-token delta per second, if one is measurable.
+
+    ``samples`` are ``(timestamp, output tokens so far this turn)`` readings,
+    which is the one shape both CLIs can be reduced to: Codex emits cumulative
+    token counts directly, and Claude's per-message counts accumulate into the
+    same running total. Their interval therefore supports an observed output
+    throughput — it spans whatever tool calls fell between two readings — not a
+    claim about the model's decode speed.
+
+    Only the *last* usable pair is reported, so the figure tracks what the
+    session is doing now rather than averaging over the whole turn. Sorting here
+    keeps out-of-order records from changing either the interval or its sign.
+    """
+    latest = None
+    ordered = sorted(samples)
+    for (start, earlier), (end, later) in zip(ordered, ordered[1:]):
+        elapsed = end - start
+        if elapsed > 0 and later > earlier:
+            latest = (later - earlier) / elapsed
+    return latest
 
 
 @dataclass

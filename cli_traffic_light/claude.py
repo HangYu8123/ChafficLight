@@ -20,7 +20,7 @@ import psutil
 
 from .jsonl import parse_iso, read_jsonl
 from .state import Session, SessionState, claude_status_to_state, is_stale
-from .tokens import TokenUsage, claude_usage_from_record
+from .tokens import TokenUsage, claude_usage_from_record, observed_output_rate
 
 __all__ = ["ClaudeReader"]
 
@@ -43,9 +43,11 @@ _DOTNET_EPOCH = datetime(1, 1, 1)
 #: rounding while staying far tighter than any interval a pid is reused over.
 _START_TICKS_TOLERANCE = 10_000 if _IS_WINDOWS else 0
 
-#: Only transcript lines carrying this key can hold token usage, so the rest are
-#: skipped before being parsed.
+#: Only transcript lines carrying one of these keys are of any use here: the
+#: first holds token usage, the second marks which turn a record belongs to.
+#: Everything else is skipped before being parsed.
 _USAGE_KEY = '"usage"'
+_PROMPT_KEY = '"promptId"'
 
 
 def _dotnet_ticks(epoch: float) -> int:
@@ -99,6 +101,55 @@ def _usage_samples(records: Iterable[dict]) -> list[tuple[float, TokenUsage]]:
             claude_usage_from_record(usage),
         )
     return sorted(latest.values(), key=lambda sample: sample[0])
+
+
+def _rate_samples(records: Iterable[dict]) -> list[tuple[float, int]]:
+    """``(timestamp, output tokens so far this turn)`` over ``records``, in file order.
+
+    Reduces a transcript to the shape :func:`~.tokens.observed_output_rate`
+    reads, which is the same one Codex's cumulative token counts already take.
+    Claude reports usage per message rather than as a running total, so the
+    total is accumulated here.
+
+    Only the current turn is kept. Restarting at each turn boundary is what
+    holds the user's own thinking time out of the interval: the wait between two
+    turns would otherwise become the denominator of the new turn's first
+    message.
+    """
+    samples: list[tuple[float, int]] = []
+    prompt_id = None
+    total = 0
+    last_message_id = None
+    for record in records:
+        if record.get("type") == "user":
+            # Every record of a turn carries its prompt's id, so a change of id
+            # is a turn boundary — no need to tell a typed prompt apart from a
+            # tool result by the shape of its content.
+            current = record.get("promptId")
+            if current is not None and current != prompt_id:
+                prompt_id = current
+                samples, total, last_message_id = [], 0, None
+            continue
+        message = record.get("message") or {}
+        usage = message.get("usage")
+        if record.get("type") != "assistant" or not usage:
+            continue
+        timestamp = parse_iso(record.get("timestamp"))
+        if timestamp is None:
+            continue
+        # One message is written as several consecutive records, one per content
+        # block, each repeating the whole message's usage. Only the first may
+        # add those tokens; the others move the reading's end forward, since a
+        # block's record is written when that block finishes being generated.
+        message_id = message.get("id")
+        if message_id is not None and message_id == last_message_id:
+            if samples:
+                samples[-1] = (timestamp, samples[-1][1])
+            continue
+        last_message_id = message_id
+        total += claude_usage_from_record(usage).output_tokens
+        samples.append((timestamp, total))
+    return samples
 
 
 def _total_usage(samples: Iterable[tuple[float, TokenUsage]]) -> TokenUsage:
@@ -160,12 +211,12 @@ class ClaudeReader:
         for path in sorted(projects.glob("*/*/subagents/*.jsonl")):
             if _mtime_is_stale(path, now):
                 continue
-            main, sidechain, _ = self._transcript_samples(path)
+            main, sidechain, _, _ = self._transcript_samples(path)
             samples += main + sidechain
         return _total_usage(samples)
 
-    def _transcript_samples(self, path: Path) -> tuple[list, list, str]:
-        """``(main-thread samples, sidechain samples, session cwd)`` of one transcript.
+    def _transcript_samples(self, path: Path) -> tuple[list, list, str, list]:
+        """``(main samples, sidechain samples, cwd, rate samples)`` of one transcript.
 
         Parsed once per file revision and kept: a refresh walks the same
         transcripts twice — once for the sessions, once for the subagent
@@ -181,7 +232,7 @@ class ClaudeReader:
         cached = self._samples.get(path)
         if cached is None or cached[0] != key:
             main, sidechain, cwd = [], [], ""
-            for record in read_jsonl(path, only_lines_with=_USAGE_KEY):
+            for record in read_jsonl(path, only_lines_with=(_USAGE_KEY, _PROMPT_KEY)):
                 is_sidechain = record.get("isSidechain")
                 (sidechain if is_sidechain else main).append(record)
                 # The records carry the directory the session was in when each
@@ -189,7 +240,17 @@ class ClaudeReader:
                 # before any directory change the agent made.
                 if not is_sidechain and not cwd:
                     cwd = record.get("cwd") or ""
-            cached = (key, (_usage_samples(main), _usage_samples(sidechain), cwd))
+            cached = (
+                key,
+                (
+                    _usage_samples(main),
+                    _usage_samples(sidechain),
+                    cwd,
+                    # Main-thread only: a subagent's pace is not this session's,
+                    # and its records interleave with no bearing on the turn.
+                    _rate_samples(main),
+                ),
+            )
             self._samples[path] = cached
         return cached[1]
 
@@ -203,7 +264,8 @@ class ClaudeReader:
             return None
         session_id = record.get("sessionId")
         transcript = transcripts.pop(session_id, None)
-        samples = self._transcript_samples(transcript)[0] if transcript else []
+        parsed = self._transcript_samples(transcript) if transcript else ([], [], "", [])
+        samples, rate_samples = parsed[0], parsed[3]
         last_activity = max(
             parse_iso(record.get("updatedAt")) or 0.0,
             samples[-1][0] if samples else 0.0,
@@ -215,11 +277,13 @@ class ClaudeReader:
             if self._is_alive(record.get("pid"), record.get("procStart"))
             else SessionState.FINISHED
         )
-        rate = (
-            None
-            if state in (SessionState.RUNNING, SessionState.UNKNOWN)
-            else 0.0
-        )
+        if state is SessionState.RUNNING:
+            rate = observed_output_rate(rate_samples)
+        elif state is SessionState.UNKNOWN:
+            rate = None
+        else:
+            # Nothing is generating, so the rate is not unknown — it is zero.
+            rate = 0.0
         return Session(
             session_id=session_id,
             agent="claude",
@@ -227,9 +291,6 @@ class ClaudeReader:
             cwd=record.get("cwd", ""),
             state=state,
             usage=_total_usage(samples),
-            # Claude records when a response completed, but not when generation
-            # started or ended. While it is running, a rate derived from gaps
-            # between records would mix generation with user and tool time.
             tokens_per_sec=rate,
             is_vscode=False,
             vscode_confidence="none",
@@ -239,7 +300,7 @@ class ClaudeReader:
 
     def _finished_session(self, session_id: str, path: Path, now: float) -> Session | None:
         """Build the session a transcript with no live session file describes."""
-        samples, _, cwd = self._transcript_samples(path)
+        samples, _, cwd, _ = self._transcript_samples(path)
         last_activity = samples[-1][0] if samples else 0.0
         if is_stale(last_activity, now):
             return None

@@ -39,17 +39,22 @@ def parse_iso(stamp: str | int | float | None) -> float | None:
         return None
 
 
-def read_jsonl(path: Path, *, only_lines_with: str | None = None) -> Iterator[dict]:
+def read_jsonl(
+    path: Path, *, only_lines_with: str | tuple[str, ...] | None = None
+) -> Iterator[dict]:
     """Yield the JSON objects in ``path``.
 
     Both CLIs append to these files while we read them, so a half-written final
     line is expected rather than exceptional and is skipped.
 
-    ``only_lines_with`` skips any line not containing that literal without
+    ``only_lines_with`` skips any line containing none of those literals without
     parsing it. These transcripts run to tens of megabytes of records a caller
     that wants one field will discard, and JSON-parsing all of them is what made
-    a snapshot slow; the substring is a pre-filter, never the actual test.
+    a snapshot slow; the substrings are a pre-filter, never the actual test. A
+    tuple matches any of its members, for callers that need two kinds of record
+    out of one pass.
     """
+    wanted = (only_lines_with,) if isinstance(only_lines_with, str) else only_lines_with
     try:
         # errors="replace": a half-written final line can end mid multi-byte
         # character, and a UnicodeDecodeError there would abort the whole read.
@@ -57,7 +62,7 @@ def read_jsonl(path: Path, *, only_lines_with: str | None = None) -> Iterator[di
     except OSError:
         return
     for line in text.splitlines():
-        if only_lines_with is not None and only_lines_with not in line:
+        if wanted is not None and not any(literal in line for literal in wanted):
             continue
         try:
             record = json.loads(line)

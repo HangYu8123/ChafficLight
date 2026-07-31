@@ -20,11 +20,22 @@ lamp is how many sessions are in that state:
 
 
 Underneath the lamps are the tokens spent since the app started and the latest
-observable output-token rate. Codex supplies timed cumulative output snapshots,
-so ChafficLight can show their most recent interval in tok/s. Claude Code
-transcripts record token counts but not the generation interval; while any running
-session has no measurable rate, the widget shows **— tok/s** instead of inventing
-zero. **0.0 tok/s** therefore means no session is running.
+observable output-token rate, summed over every running session of **both** CLIs.
+Each one is measured the same way: take the output tokens counted so far in the
+current turn, and divide the most recent change in that figure by the time it
+took. Codex writes those cumulative counts itself; Claude's per-message counts
+are added up into the same running total.
+
+It is the *most recent* interval, not an average of the turn, so the number
+tracks what your agents are doing right now. It is also throughput rather than
+the model's decode speed: whatever tool calls fell between the last two readings
+are inside the interval, so a session that spends most of its time running
+commands reads lower than one writing prose.
+
+A session one message into a turn has nothing to divide yet and is left out of
+the sum. When *no* running session has a measurable interval the widget shows
+**— tok/s** rather than inventing zero, so **0.0 tok/s** still means nothing is
+running.
 
 Try the minimize feature if your just want to see the lights (single click on the lights to reverse). 
 
