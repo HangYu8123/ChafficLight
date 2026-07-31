@@ -6,6 +6,8 @@
 
 ## What it does
 
+Tired of tracking chat sessions in mind? Try ChifficLight!
+
 ChafficLight watches your **Claude Code CLI** and **Codex CLI** chat sessions and shows
 their status as one small traffic light floating on your desktop. The number inside each
 lamp is how many sessions are in that state:
@@ -16,13 +18,32 @@ lamp is how many sessions are in that state:
 | 🟡 yellow ✨ | needs input — the agent asked you something and is blocked. **This lamp flashes.** |
 | 🟢 green | running — the agent is working and wants nothing from you |
 
-Underneath the lamps are the tokens spent since the app started, and the current tokens/sec.
+
+Underneath the lamps are the tokens spent since the app started, and the current tokens/sec, a good way to see how fast you are burning your tokens!
+
+Try the minimize feature if your just want to see the lights (single click on the lights to reverse). 
 
 <p align="center">
   <img src="docs/chafficlight-ui.png" alt="ChafficLight window" width="300">
 </p>
 
+Press the **─** in the top-left corner to shrink it to a bar — the same three lamps at a
+glance, with the tokens/sec beside them. Click the little traffic light to bring the full
+window back; dragging it just moves it, as always. There is no **✕** on the bar, so closing
+from there is two steps: come back first, then press it.
+
+<p align="center">
+  <img src="docs/chafficlight-bar.png" alt="ChafficLight minimized to a bar" width="220">
+</p>
+
 It only ever reads the two CLIs' state directories — it never writes to them.
+
+**It stays out of your way.** On Windows the light does not take clicks at all: click a
+lamp, the tokens, anywhere on it, and the click goes to whatever is underneath, exactly as
+if the widget were not there. The one exception is the ✕, which is also the handle you drag
+the light around by — press it and move to reposition, click it to close. On macOS and
+Linux the widget is still a normal, solid window: the Windows-only mechanism this needs has
+no equivalent that plain Tk can reach.
 
 ## Install
 

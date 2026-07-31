@@ -100,9 +100,19 @@ class Session:
 #: ``idle`` otherwise. Only ``waiting`` is a question for the user — it is
 #: accompanied by a ``waitingFor`` note reading "permission prompt", "input
 #: needed", "sandbox request", "worker request" or "dialog open".
+#:
+#: ``shell`` is IDLE, not RUNNING, even though something really is executing.
+#: The CLI derives it from *idle and* a live background job, so the agent's turn
+#: is over either way and the session is ready for the next prompt — which is
+#: what the red lamp says. A background job, unlike a turn, has no end the agent
+#: is waiting for: nothing reaps one, so a job that never exits pins the status
+#: forever. Launching this very widget from a Claude session did exactly that,
+#: and held the green lamp on for as long as the window stayed open. Green has
+#: to mean the agent is working, or it means nothing; a foreground command is
+#: ``busy``, so nothing that the agent is actually waiting on is lost here.
 _CLAUDE_STATUS_STATES = {
     "busy": SessionState.RUNNING,
-    "shell": SessionState.RUNNING,
+    "shell": SessionState.IDLE,
     "waiting": SessionState.NEEDS_INPUT,
     "idle": SessionState.IDLE,
 }

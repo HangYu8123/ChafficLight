@@ -23,7 +23,7 @@ NOW = 1_753_700_000.0
     "status, expected",
     [
         ("busy", SessionState.RUNNING),
-        ("shell", SessionState.RUNNING),
+        ("shell", SessionState.IDLE),
         ("waiting", SessionState.NEEDS_INPUT),
         ("idle", SessionState.IDLE),
         ("compacting", SessionState.UNKNOWN),
@@ -95,11 +95,19 @@ def test_unrecognised_claude_status_is_unknown_not_needs_input():
     assert result != SessionState.NEEDS_INPUT
 
 
-def test_shell_status_is_running_not_idle():
-    """``shell`` is a finished turn with a background command still executing."""
+def test_a_background_job_does_not_make_the_session_running():
+    """``shell`` is a finished turn, so it is IDLE however long the job runs.
+
+    The CLI computes ``shell`` from *idle and* a live background job, so the
+    agent's turn is over. Nothing reaps such a job, so one that never exits —
+    the widget itself, launched from a Claude session — held the green lamp on
+    indefinitely while the agent sat at its prompt. ``busy`` is the only status
+    a foreground command produces, which is why nothing is lost by this.
+    """
     result = claude_status_to_state("shell")
-    assert result == SessionState.RUNNING
-    assert result != SessionState.IDLE
+    assert result == SessionState.IDLE
+    assert result != SessionState.RUNNING
+    assert claude_status_to_state("busy") == SessionState.RUNNING
 
 
 @pytest.mark.parametrize(

@@ -8,7 +8,8 @@ along with token usage. They then asked for the window to be polished, for its
 background to be transparent, and for the drawing to be higher resolution. They
 then swapped what two of the lamps mean — red for a turn that is over, yellow
 for a session that has asked them something — and asked for the yellow lamp to
-flash whenever its count is not zero.
+flash whenever its count is not zero. They then asked that the widget block no
+clicks at all apart from its close button, everything else passing through it.
 
 Everything with an edge is rendered by Pillow at :data:`_SUPERSAMPLE` times the
 final size and scaled back down, because the Tk canvas does not antialias: its
@@ -171,12 +172,42 @@ _STATS_TOP_GAP = 24
 _STATS_LINE_GAP = 20
 
 #: The ✕, tucked into the housing's top-right corner. The margin is what keeps it
-#: clear of both the rounded corner and the green lamp below it.
+#: clear of both the rounded corner and the green lamp below it. The ─ that
+#: minimizes the window sits at the same margin in the *top-left* corner, a
+#: mirror image of it: the space immediately left of the ✕ is over the green
+#: lamp, and the corners are the only two places on the housing with room.
 _CLOSE_RADIUS = 9
 _CLOSE_MARGIN = 15
 
 #: Room around the housing for the shadow to fall into.
 _CANVAS_PAD = 14
+
+#: The minimized bar, in the same logical pixels as the face above: the three
+#: lamps at a glanceable size with the tokens/sec figure beside them, and nothing
+#: else. The counts are dropped rather than shrunk — a digit inside an 8 px lamp
+#: is not a number anybody reads — and so is the running token total, since the
+#: rate is the one figure the request names. The bar is what the widget *is*
+#: while minimized, not an icon of it, which is why it stays a drawn housing.
+#:
+#: :data:`_BAR_LAMP_GAP` must stay at least twice :data:`_BAR_GLOW_WIDTH`, the
+#: same tiling rule the full face obeys: a lamp's tile is its radius plus its
+#: glow, and neighbouring tiles must meet rather than overlap.
+_BAR_LAMP_RADIUS = 8
+_BAR_LAMP_GAP = 8
+_BAR_GLOW_WIDTH = 4
+_BAR_WELL_RING = 2
+_BAR_SIDE_MARGIN = 11
+_BAR_VERTICAL_MARGIN = 9
+_BAR_HOUSING_RADIUS = 12
+_BAR_CANVAS_PAD = 8
+
+#: The gap between the last lamp and the rate, and the room kept for the rate
+#: itself. Reserved as a fixed width rather than measured, because the layout is
+#: pure arithmetic with no Tk root to measure a font against — so it is sized for
+#: a figure far larger than any real one and the text is centred inside it.
+_BAR_RATE_GAP = 10
+_BAR_RATE_WIDTH = 68
+_BAR_RATE_FONT_PX = 12
 
 #: Text sizes, in pixels rather than points, so they scale with the drawing
 #: instead of with whatever ``tk scaling`` was left at — the housing is sized
@@ -192,6 +223,108 @@ _RATE_FONT_PX = 12
 #: rather than the housing beneath it.
 _DRAG_TAG = "drag"
 _CLOSE_TAG = "close"
+
+#: The ─ that shrinks the widget to the bar, and the miniature light that brings
+#: it back. The bar has no button of its own: the little traffic light *is* the
+#: one, which is what keeps the minimized widget down to a light and a figure —
+#: the two things it was asked to show — and keeps a 34 px strip from carrying a
+#: disc nearly as tall as itself.
+_MINIMIZE_TAG = "minimize"
+_RESTORE_TAG = "restore"
+
+#: How often the pointer is looked up while deciding whether the window should
+#: be taking clicks at all. It is the interval between the pointer arriving on
+#: the ✕ and the ✕ becoming clickable, so it has to be short enough to disappear
+#: into the movement that got it there; a press landing inside it is not lost
+#: silently but passed to whatever is underneath, and the next click works.
+_CLICK_THROUGH_POLL_MS = 40
+
+#: How far a press may travel and still count as a click on the ✕ rather than a
+#: drag of the window. The ✕ is the only part of the widget that stays solid, so
+#: it is also the only thing left to move the window by, and the two gestures
+#: have to share it.
+_CLOSE_DRAG_SLOP = 3
+
+#: The Win32 numbers behind click-through. Hit-testing of a *layered* window
+#: normally follows what it painted, but ``WS_EX_TRANSPARENT`` overrides that
+#: and hands the mouse to whatever is underneath — documented on Microsoft's
+#: "Window Features" page, and it is a property of the layered window, which is
+#: why :data:`_WS_EX_LAYERED` is checked rather than assumed.
+_GWL_EXSTYLE = -20
+_WS_EX_TRANSPARENT = 0x00000020
+_WS_EX_LAYERED = 0x00080000
+
+#: ``GetAncestor(hwnd, GA_ROOT)``: a Tk toplevel is two windows on Windows, and
+#: ``winfo_id()`` answers with the inner one, which carries none of the styles.
+_GA_ROOT = 2
+
+#: user32 with the signatures below declared once, or None until first asked.
+_WIN32_STYLE_CALLS = None
+
+
+def _style_calls():
+    """The three user32 entry points this module changes window styles with.
+
+    Every signature is declared, because the ``Ptr`` variants return and take a
+    pointer-width value that ctypes would otherwise truncate to 32 bits on a
+    64-bit build — silently, and only for handles large enough to notice. The
+    ``Ptr`` spelling itself is a C macro rather than an export on 32-bit
+    Windows, so it is looked up by name and falls back to the plain one.
+    """
+    global _WIN32_STYLE_CALLS
+    if _WIN32_STYLE_CALLS is None:
+        import ctypes
+
+        user32 = ctypes.windll.user32
+        user32.GetAncestor.restype = ctypes.c_void_p
+        user32.GetAncestor.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+        get_style = getattr(user32, "GetWindowLongPtrW", user32.GetWindowLongW)
+        set_style = getattr(user32, "SetWindowLongPtrW", user32.SetWindowLongW)
+        get_style.restype = ctypes.c_ssize_t
+        get_style.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        set_style.restype = ctypes.c_ssize_t
+        set_style.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_ssize_t]
+        _WIN32_STYLE_CALLS = (user32.GetAncestor, get_style, set_style)
+    return _WIN32_STYLE_CALLS
+
+
+def _layered_toplevel(root: tk.Tk) -> int | None:
+    """The window whose style decides where this app's clicks land, if any.
+
+    ``None`` on every platform but Windows, and on Windows too unless the window
+    found really is the layered one: the answer is checked against
+    :data:`_WS_EX_LAYERED` rather than trusted, because writing the pass-through
+    bit to the wrong window would silently leave the widget blocking clicks and
+    make something else click-through instead.
+    """
+    if sys.platform != "win32":
+        return None
+    try:
+        get_ancestor, get_style, _set = _style_calls()
+        handle = get_ancestor(root.winfo_id(), _GA_ROOT)
+        if handle and get_style(handle, _GWL_EXSTYLE) & _WS_EX_LAYERED:
+            return handle
+    except (AttributeError, OSError):
+        return None
+    return None
+
+
+def _set_click_through(handle: int, through: bool) -> bool:
+    """Let clicks pass through ``handle``, or take them back; report success.
+
+    Only the one bit is touched. The rest of the extended style is Tk's —
+    ``WS_EX_LAYERED`` above all, which is what ``-transparentcolor`` set and
+    what makes this bit mean anything.
+    """
+    try:
+        _ancestor, get_style, set_style = _style_calls()
+        style = get_style(handle, _GWL_EXSTYLE)
+        wanted = style | _WS_EX_TRANSPARENT if through else style & ~_WS_EX_TRANSPARENT
+        if wanted != style:
+            set_style(handle, _GWL_EXSTYLE, wanted)
+        return bool(get_style(handle, _GWL_EXSTYLE) & _WS_EX_TRANSPARENT) is through
+    except (AttributeError, OSError):
+        return False
 
 
 def enable_hidpi() -> bool:
@@ -249,7 +382,36 @@ def _rgb_to_hex(red: int, green: int, blue: int) -> str:
     return f"#{red:02x}{green:02x}{blue:02x}"
 
 
-class _Layout:
+class _Geometry:
+    """The arithmetic both sizes of the window share.
+
+    A base class rather than a copy in each, because :class:`_Face` draws from
+    these three and nothing else: a lamp's centre and the housing's box are what
+    it crops tiles against, so the two layouts have to agree on them exactly or
+    the bar's lamps would sit on pixels cut from somewhere they are not.
+    """
+
+    scale: float
+
+    def _px(self, value: float) -> int:
+        """One logical length in real pixels, never rounded away to nothing."""
+        return max(1, round(value * self.scale))
+
+    def lamp_center_x(self, index: int) -> int:
+        """Where the ``index``-th lamp of :data:`_LAMP_ORDER` is centred."""
+        return self.first_lamp_x + index * self.lamp_pitch
+
+    def housing_box(self) -> tuple[int, int, int, int]:
+        """The housing's ``(left, top, right, bottom)``, right/bottom exclusive."""
+        return (
+            self.pad,
+            self.pad,
+            self.pad + self.housing_width,
+            self.pad + self.housing_height,
+        )
+
+
+class _Layout(_Geometry):
     """Every pixel position the window uses, at one display scale factor.
 
     Pure arithmetic on the logical constants above, so the whole geometry can be
@@ -293,27 +455,60 @@ class _Layout:
         self.close_center_x = self.pad + self.housing_width - px(_CLOSE_MARGIN)
         self.close_center_y = self.pad + px(_CLOSE_MARGIN)
         self.close_half = self.close_radius + px(3)
+        # The ─, mirrored into the opposite corner. The space immediately left of
+        # the ✕ is over the green lamp, and these two corners are the only places
+        # on the housing far enough from a lamp centre to take a button.
+        self.minimize_center_x = self.pad + px(_CLOSE_MARGIN)
+        self.minimize_center_y = self.close_center_y
 
         self.count_font_px = px(_COUNT_FONT_PX)
         self.tokens_font_px = px(_TOKENS_FONT_PX)
         self.rate_font_px = px(_RATE_FONT_PX)
 
-    def _px(self, value: float) -> int:
-        """One logical length in real pixels, never rounded away to nothing."""
-        return max(1, round(value * self.scale))
 
-    def lamp_center_x(self, index: int) -> int:
-        """Where the ``index``-th lamp of :data:`_LAMP_ORDER` is centred."""
-        return self.first_lamp_x + index * self.lamp_pitch
+class _BarLayout(_Geometry):
+    """Every pixel position the minimized bar uses, at one display scale factor.
 
-    def housing_box(self) -> tuple[int, int, int, int]:
-        """The housing's ``(left, top, right, bottom)``, right/bottom exclusive."""
-        return (
-            self.pad,
-            self.pad,
-            self.pad + self.housing_width,
-            self.pad + self.housing_height,
+    Deliberately the same attribute names :class:`_Face` reads off
+    :class:`_Layout`, so one renderer draws both sizes and neither has a drawing
+    path of its own to keep in step. What differs is only what the bar carries:
+    three small lamps and the rate beside them, no counts, no token total and no
+    buttons.
+    """
+
+    def __init__(self, scale: float = 1.0):
+        self.scale = scale
+        px = self._px
+
+        self.hairline = px(1)
+        self.pad = px(_BAR_CANVAS_PAD)
+        self.lamp_radius = px(_BAR_LAMP_RADIUS)
+        self.lamp_pitch = px(2 * _BAR_LAMP_RADIUS + _BAR_LAMP_GAP)
+        self.well_ring = px(_BAR_WELL_RING)
+        self.tile_half = px(_BAR_LAMP_RADIUS + _BAR_GLOW_WIDTH)
+        self.housing_radius = px(_BAR_HOUSING_RADIUS)
+
+        side = px(_BAR_SIDE_MARGIN)
+        lamps_width = (
+            2 * self.lamp_radius + (len(_LAMP_ORDER) - 1) * self.lamp_pitch
         )
+        self.rate_width = px(_BAR_RATE_WIDTH)
+        self.housing_width = (
+            2 * side + lamps_width + px(_BAR_RATE_GAP) + self.rate_width
+        )
+        self.housing_height = 2 * px(_BAR_VERTICAL_MARGIN) + 2 * self.lamp_radius
+
+        self.first_lamp_x = self.pad + side + self.lamp_radius
+        self.lamp_center_y = self.pad + self.housing_height // 2
+
+        self.width = self.housing_width + 2 * self.pad
+        self.height = self.housing_height + 2 * self.pad
+
+        self.rate_center_x = (
+            self.pad + self.housing_width - side - self.rate_width // 2
+        )
+        self.rate_center_y = self.lamp_center_y
+        self.rate_font_px = px(_BAR_RATE_FONT_PX)
 
 
 def _vertical_gradient(
@@ -375,9 +570,12 @@ class _Face:
             )
             # Half the glow's width as the blur radius: Pillow's Gaussian reaches
             # about three of those, so the bleed dies out just inside the tile.
-            tile.paste(
-                rgb, mask=glow.filter(ImageFilter.GaussianBlur(self._length(_GLOW_WIDTH) / 2))
-            )
+            # Taken from the tile the layout actually built — the room it left
+            # around the lamp *is* the glow — rather than from the module
+            # constant, so the bar's smaller lamps get their own smaller bleed
+            # and neither size can drift from the width it was given.
+            spread = (layout.tile_half - layout.lamp_radius) * self._sample
+            tile.paste(rgb, mask=glow.filter(ImageFilter.GaussianBlur(spread / 2)))
 
         ImageDraw.Draw(tile).ellipse(
             self._disc(local, local, layout.lamp_radius),
@@ -387,34 +585,44 @@ class _Face:
         )
         return self._reduce(tile, (2 * local, 2 * local))
 
-    def close_button(self) -> Image.Image:
-        """The ✕ that closes the window, as its own opaque, clickable disc.
+    def button(
+        self, center_x: int, center_y: int, radius: int, half: int, mark: str
+    ) -> Image.Image:
+        """One of the window's buttons, as its own opaque, clickable disc.
 
         Its own image rather than part of the housing because a canvas delivers a
         click to the topmost *item*: drawn into the housing it would be pixels on
         the thing that drags the window, and dragging is what the click would do.
 
-        The cross is two lines rather than a ``✕`` glyph because this is the only
-        affordance the window has, and it must not depend on whichever font Tk
-        falls back to on a given desktop.
+        Every mark is drawn from lines rather than set as a glyph — ``✕``, ``─``
+        — because these are the only affordances the window has, and they must
+        not depend on whichever font Tk falls back to on a given desktop.
         """
         layout = self._layout
-        tile = self._crop(layout.close_center_x, layout.close_center_y, layout.close_half)
-        local, radius = layout.close_half, layout.close_radius
+        tile = self._crop(center_x, center_y, half)
         draw = ImageDraw.Draw(tile)
-        draw.ellipse(self._disc(local, local, radius), fill=_hex_to_rgb(_CLOSE_FILL_COLOR))
+        draw.ellipse(self._disc(half, half, radius), fill=_hex_to_rgb(_CLOSE_FILL_COLOR))
         arm = round(radius * 0.42) * self._sample
-        center = local * self._sample
-        for x_sign in (1, -1):
-            draw.line(
-                (
-                    center - arm * x_sign, center - arm,
-                    center + arm * x_sign, center + arm,
-                ),
-                fill=_hex_to_rgb(_CLOSE_MARK_COLOR),
-                width=max(1, round(layout.hairline * 1.6)) * self._sample,
-            )
-        return self._reduce(tile, (2 * local, 2 * local))
+        center = half * self._sample
+        ink = _hex_to_rgb(_CLOSE_MARK_COLOR)
+        width = max(1, round(layout.hairline * 1.6)) * self._sample
+        if mark == "cross":
+            for x_sign in (1, -1):
+                draw.line(
+                    (
+                        center - arm * x_sign, center - arm,
+                        center + arm * x_sign, center + arm,
+                    ),
+                    fill=ink,
+                    width=width,
+                )
+        else:
+            # The ─ is drawn wider than either arm of the ✕ so the two read as a
+            # pair at the same size: a bar as short as the cross is tall looks
+            # like a stray dot rather than a minimize mark.
+            reach = round(radius * 0.55) * self._sample
+            draw.line((center - reach, center, center + reach, center), fill=ink, width=width)
+        return self._reduce(tile, (2 * half, 2 * half))
 
     def _length(self, logical: float) -> float:
         """A logical length in oversampled pixels."""
@@ -532,10 +740,12 @@ def _photo_pixel(photo: tk.PhotoImage, x: int, y: int) -> str:
 class TrafficLightApp:
     """Draws the signal face and the token figures, and repaints on a timer.
 
-    Two timers, in fact, at deliberately different rates: `_tick` polls the
-    monitor every ``refresh_ms``, and `_flash_tick` blinks the yellow lamp every
-    :data:`_FLASH_MS` in between. Blinking on the refresh timer instead would
-    tie how fast the lamp flashes to how often the disk is read.
+    Three timers, in fact, at deliberately different rates: `_tick` polls the
+    monitor every ``refresh_ms``, `_flash_tick` blinks the yellow lamp every
+    :data:`_FLASH_MS` in between, and `_click_through_tick` watches the pointer
+    every :data:`_CLICK_THROUGH_POLL_MS` to decide whether the widget should be
+    taking clicks at all. Sharing one timer would tie how fast the lamp flashes,
+    and how quickly the ✕ answers, to how often the disk is read.
     """
 
     def __init__(self, root: tk.Tk, monitor: Monitor, refresh_ms: int = 2000):
@@ -545,6 +755,14 @@ class TrafficLightApp:
         self._refresh_ms = refresh_ms
         self._after_id: str | None = None
         self._drag_offset: tuple[int, int] | None = None
+        self._drag_origin: tuple[int, int] | None = None
+        # Click-through: the window it is set on, whether it is currently set,
+        # and the timer that follows the pointer. The applied state starts as
+        # None rather than False so the first look always writes it, whatever
+        # the window happened to open as.
+        self._click_through_handle: int | None = None
+        self._click_through_on: bool | None = None
+        self._click_through_after_id: str | None = None
         # The blink: which half of it is showing, and how many sessions the last
         # refresh put on the flashing lamp. The count is kept because the blink
         # runs on its own timer between refreshes and must repaint that lamp
@@ -589,10 +807,45 @@ class TrafficLightApp:
         face = _Face(self._layout, backdrop)
         self._build_face(face)
         self._tokens_text, self._rate_text = self._build_stats()
-        self._build_close_button(face)
+        self._build_buttons(face)
+        #: Whether the widget is currently the bar rather than the full face.
+        #: Public because it is the other thing, besides `transparent`, that says
+        #: which of two looks is on screen.
+        self.minimized = False
+        self._bar_layout = _BarLayout(self._layout.scale)
+        self._bar_canvas = tk.Canvas(
+            root,
+            width=self._bar_layout.width,
+            height=self._bar_layout.height,
+            highlightthickness=0,
+            background=backdrop,
+        )
+        self._build_bar(_Face(self._bar_layout, backdrop))
         self._canvas.tag_bind(_DRAG_TAG, "<ButtonPress-1>", self._start_drag)
         self._canvas.tag_bind(_DRAG_TAG, "<B1-Motion>", self._drag)
-        self._canvas.tag_bind(_CLOSE_TAG, "<ButtonRelease-1>", lambda _event: self.close())
+        self._canvas.tag_bind(_DRAG_TAG, "<ButtonRelease-1>", self._end_drag)
+        # The ✕ drags as well as closes. Once the rest of the widget stops
+        # taking clicks it is the only solid thing left, and `_start_drag` is
+        # the only code in the app that ever positions the window — so without
+        # this the light would sit wherever it opened for the rest of its life.
+        self._canvas.tag_bind(_CLOSE_TAG, "<ButtonPress-1>", self._start_drag)
+        self._canvas.tag_bind(_CLOSE_TAG, "<B1-Motion>", self._drag)
+        self._canvas.tag_bind(_CLOSE_TAG, "<ButtonRelease-1>", self._release_close)
+        # The ─ and the miniature light carry the same three bindings for the
+        # same reason: while clicks pass through everything else, a button is
+        # also the only thing left to move the window by.
+        self._canvas.tag_bind(_MINIMIZE_TAG, "<ButtonPress-1>", self._start_drag)
+        self._canvas.tag_bind(_MINIMIZE_TAG, "<B1-Motion>", self._drag)
+        self._canvas.tag_bind(_MINIMIZE_TAG, "<ButtonRelease-1>", self._release_minimize)
+        #: Whether clicks pass through the widget everywhere but the ✕. Public
+        #: alongside `transparent`, and — like it — a statement about what this
+        #: window can do: passing clicks on is a property of the *layered*
+        #: window `-transparentcolor` just made, so it follows that answer.
+        self.click_through = sys.platform == "win32" and self.transparent
+        if self.click_through:
+            # Straight away rather than on the timer, so the widget spends as
+            # little time as possible solid over whatever it opened on top of.
+            self._click_through_tick()
         self._schedule()
 
     def refresh(self) -> None:
@@ -611,8 +864,27 @@ class TrafficLightApp:
         # interval. The terms are addable even though each is measured over its
         # own newest step: they are speeds running side by side right now, and
         # two sessions burning tokens at once do burn them at the combined rate.
-        rate = sum(session.tokens_per_sec for session in sessions)
-        self._canvas.itemconfig(self._rate_text, text=f"{rate:.1f} tok/s")
+        #
+        # Over the RUNNING sessions alone. Only a turn in flight can be billing
+        # tokens, so this is what the figure claims to measure — and it is what
+        # makes the two halves of the face agree by construction: a dark green
+        # lamp now *means* zero, instead of merely tending towards it. A rate
+        # ages with the silence after its last billed record rather than
+        # stopping dead, so every other state carries the decaying tail of a
+        # burst that is already over: a finished session for the minute after
+        # it ends, and an idle one for the minute after its turn does. Summing
+        # those printed a speed under three lamps reading zero.
+        rate = sum(
+            session.tokens_per_sec
+            for session in sessions
+            if session.state is SessionState.RUNNING
+        )
+        rate_text = f"{rate:.1f} tok/s"
+        self._canvas.itemconfig(self._rate_text, text=rate_text)
+        # The one figure the bar keeps: minimized, the question is still "how
+        # fast is this costing me?", where the running total is something to go
+        # and look at rather than to watch.
+        self._bar_canvas.itemconfig(self._bar_rate_text, text=rate_text)
 
     def lamps(self) -> dict[SessionState, dict[str, str]]:
         """Each lamp's rendered ``{"fill", "text", "text_fill"}``, off the canvas.
@@ -644,6 +916,42 @@ class TrafficLightApp:
             "rate": self._canvas.itemcget(self._rate_text, "text"),
         }
 
+    def bar(self) -> dict[str, object]:
+        """What the minimized bar is showing: each lamp's fill, and the rate.
+
+        Read back off the bar's own canvas and its own middle pixel, exactly as
+        `lamps()` is: the bar's lamps are smaller, so sampling them at the full
+        face's `tile_half` would read a pixel outside the lamp altogether.
+        """
+        middle = self._bar_layout.tile_half
+        return {
+            "lamps": {
+                state: _photo_pixel(
+                    self._images[self._bar_canvas.itemcget(item, "image")], middle, middle
+                )
+                for state, item in self._bar_lamps.items()
+            },
+            "rate": self._bar_canvas.itemcget(self._bar_rate_text, "text"),
+        }
+
+    def minimize(self) -> None:
+        """Shrink the widget to the bar: the light, small, and the rate."""
+        if self.minimized:
+            return
+        self.minimized = True
+        self._canvas.pack_forget()
+        self._bar_canvas.pack()
+        self._resize(self._bar_layout)
+
+    def restore(self) -> None:
+        """Bring the full face back, where the bar was standing."""
+        if not self.minimized:
+            return
+        self.minimized = False
+        self._bar_canvas.pack_forget()
+        self._canvas.pack()
+        self._resize(self._layout)
+
     def stop(self) -> None:
         """Cancel every pending ``after()`` callback this app scheduled."""
         if self._after_id is not None:
@@ -652,6 +960,9 @@ class TrafficLightApp:
         if self._flash_after_id is not None:
             self._root.after_cancel(self._flash_after_id)
             self._flash_after_id = None
+        if self._click_through_after_id is not None:
+            self._root.after_cancel(self._click_through_after_id)
+            self._click_through_after_id = None
 
     def close(self) -> None:
         """Stop the timer and tear the window down."""
@@ -786,22 +1097,89 @@ class TrafficLightApp:
         )
         return tokens, rate
 
-    def _build_close_button(self, face: _Face) -> None:
-        """Place the ✕, last, so nothing can be drawn over it.
+    def _build_buttons(self, face: _Face) -> None:
+        """Place the ─ and the ✕, last, so nothing can be drawn over them.
 
-        A keyed pixel is not merely invisible but click-through, so the disc is
-        opaque; and a canvas hands a click to the topmost item, so it is created
-        after the housing it sits on. Either mistake leaves a window with no
-        title bar and no way to close it.
+        A keyed pixel is not merely invisible but click-through, so each disc is
+        opaque; and a canvas hands a click to the topmost item, so both are
+        created after the lamps whose tiles their corners reach into. Either
+        mistake leaves a button that is drawn and does nothing.
         """
         layout = self._layout
-        self._canvas.create_image(
-            layout.close_center_x,
-            layout.close_center_y,
-            image=self._add_image(_photo(face.close_button())),
-            anchor="center",
-            tags=_CLOSE_TAG,
+        for center_x, center_y, mark, tag in (
+            (layout.minimize_center_x, layout.minimize_center_y, "dash", _MINIMIZE_TAG),
+            (layout.close_center_x, layout.close_center_y, "cross", _CLOSE_TAG),
+        ):
+            self._canvas.create_image(
+                center_x,
+                center_y,
+                image=self._add_image(
+                    _photo(
+                        face.button(
+                            center_x, center_y, layout.close_radius, layout.close_half, mark
+                        )
+                    )
+                ),
+                anchor="center",
+                tags=tag,
+            )
+
+    def _build_bar(self, face: _Face) -> None:
+        """Draw the minimized bar on its own canvas: three lamps and the rate.
+
+        Its own canvas rather than more items on the one already there, so that
+        only one of the two sizes is ever packed and everything else — the item
+        ids `lamps()` reads, the "nothing is drawn outside the canvas" rule, the
+        count of items a repaint may not add to — keeps meaning exactly what it
+        meant before. Both sizes are built now and neither is ever rebuilt: the
+        one that is hidden is repainted alongside the one that is showing, so a
+        toggle can never reveal a stale light.
+        """
+        layout, canvas = self._bar_layout, self._bar_canvas
+        canvas.create_image(
+            0, 0, image=self._add_image(_photo(face.base())), anchor="nw", tags=_DRAG_TAG
         )
+        self._bar_lamps: dict[SessionState, int] = {}
+        self._bar_lamp_photos: dict[SessionState, dict[bool, tk.PhotoImage]] = {}
+        for index, state in enumerate(_LAMP_ORDER):
+            self._bar_lamp_photos[state] = {
+                lit: self._add_image(
+                    _photo(
+                        face.lamp(
+                            index,
+                            STATE_COLORS[state]
+                            if lit
+                            else _UNLIT_COLORS.get(state, _UNLIT_FALLBACK),
+                            lit,
+                        )
+                    )
+                )
+                for lit in (False, True)
+            }
+            self._bar_lamps[state] = canvas.create_image(
+                layout.lamp_center_x(index),
+                layout.lamp_center_y,
+                image=self._bar_lamp_photos[state][False],
+                anchor="center",
+                tags=_RESTORE_TAG,
+            )
+        self._bar_rate_text = canvas.create_text(
+            layout.rate_center_x,
+            layout.rate_center_y,
+            text="",
+            fill=_RATE_TEXT_COLOR,
+            font=self._font(layout.rate_font_px, "bold"),
+            tags=_DRAG_TAG,
+        )
+        # The light itself is the way back, so it takes the same press/move/
+        # release trio the ✕ does; the housing and the figure beside it drag
+        # only, which is what they do on the full face too.
+        canvas.tag_bind(_RESTORE_TAG, "<ButtonPress-1>", self._start_drag)
+        canvas.tag_bind(_RESTORE_TAG, "<B1-Motion>", self._drag)
+        canvas.tag_bind(_RESTORE_TAG, "<ButtonRelease-1>", self._release_restore)
+        canvas.tag_bind(_DRAG_TAG, "<ButtonPress-1>", self._start_drag)
+        canvas.tag_bind(_DRAG_TAG, "<B1-Motion>", self._drag)
+        canvas.tag_bind(_DRAG_TAG, "<ButtonRelease-1>", self._end_drag)
 
     def _relight(self, counts: Counter) -> None:
         """Light each lamp whose state has sessions and dim the rest.
@@ -836,6 +1214,13 @@ class TrafficLightApp:
             text=str(count),
             fill=_LIT_TEXT_COLOR if lit else _UNLIT_TEXT_COLOR,
         )
+        # The bar carries the same three lamps, blink included, and is painted
+        # here rather than when it is shown: whichever size is hidden has to be
+        # right already, or minimizing would show the light as it was one refresh
+        # ago. It carries no count — there is no room to read one.
+        self._bar_canvas.itemconfig(
+            self._bar_lamps[state], image=self._bar_lamp_photos[state][lit]
+        )
 
     def _schedule_flash(self) -> None:
         """Run the blink timer exactly while the flashing lamp has sessions.
@@ -865,9 +1250,159 @@ class TrafficLightApp:
         finally:
             self._schedule_flash()
 
+    def _resize(self, layout: _Geometry) -> None:
+        """Give the window the size of whichever face is now packed.
+
+        Set outright rather than left to Tk's geometry propagation: `_drag` has
+        very likely already called ``wm geometry``, and Tk documents a toplevel
+        whose geometry has been set as no longer following the size its children
+        ask for. The position is read back and written unchanged, so the widget
+        stays where it was standing — the two sizes share their top-left corner
+        rather than their centre, which is also what makes a drag of the bar and
+        a drag of the face mean the same thing.
+        """
+        self._root.update_idletasks()
+        self._root.geometry(
+            f"{layout.width}x{layout.height}"
+            f"+{self._root.winfo_x()}+{self._root.winfo_y()}"
+        )
+
+    def _solid_spots(self) -> tuple[tuple[int, int, int], ...]:
+        """Every ``(x, y, half)`` square this widget still takes clicks on.
+
+        Whichever size is showing: the two buttons on the full face, and the
+        miniature light on the bar. Everything else is passed through, so this
+        list *is* the widget as far as the mouse is concerned — a button left out
+        of it is drawn, bound, and unclickable.
+        """
+        if self.minimized:
+            bar = self._bar_layout
+            return tuple(
+                (bar.lamp_center_x(index), bar.lamp_center_y, bar.tile_half)
+                for index in range(len(_LAMP_ORDER))
+            )
+        layout = self._layout
+        return (
+            (layout.close_center_x, layout.close_center_y, layout.close_half),
+            (layout.minimize_center_x, layout.minimize_center_y, layout.close_half),
+        )
+
+    def _pointer_over_solid(self, x: int, y: int) -> bool:
+        """Whether a window-relative point is on any of :meth:`_solid_spots`."""
+        return any(
+            abs(x - center_x) <= half and abs(y - center_y) <= half
+            for center_x, center_y, half in self._solid_spots()
+        )
+
+    def _pointer_over_close(self, x: int, y: int) -> bool:
+        """Whether a window-relative point is on the ✕.
+
+        The whole of the ✕'s canvas item, not just the disc drawn inside it: a
+        canvas hands a click to any item whose *rectangle* covers the pointer,
+        so anything smaller would leave a ring that looks clickable, is
+        clickable, and would nonetheless be passed straight through.
+        """
+        layout = self._layout
+        return (
+            abs(x - layout.close_center_x) <= layout.close_half
+            and abs(y - layout.close_center_y) <= layout.close_half
+        )
+
+    def _click_through_tick(self) -> None:
+        """Take clicks only while the pointer is on the ✕; pass the rest on.
+
+        Polled rather than answered on demand, because a window that is not
+        taking clicks is not told the pointer crossed it either — there is no
+        event to bind. The reschedule is in a ``finally`` for the same reason
+        `_tick`'s is: giving up here would leave the widget stuck solid, or
+        stuck with a ✕ that cannot be pressed.
+        """
+        self._click_through_after_id = None
+        try:
+            # Not mid-drag: the pointer leaves the ✕ immediately, and a window
+            # that stopped taking clicks halfway through would drop the gesture
+            # that is moving it.
+            if self._drag_offset is None:
+                pointer_x, pointer_y = self._root.winfo_pointerxy()
+                over = self._pointer_over_solid(
+                    pointer_x - self._root.winfo_rootx(),
+                    pointer_y - self._root.winfo_rooty(),
+                )
+                self._apply_click_through(not over)
+        finally:
+            self._click_through_after_id = self._root.after(
+                _CLICK_THROUGH_POLL_MS, self._click_through_tick
+            )
+
+    def _apply_click_through(self, through: bool) -> None:
+        """Set the pass-through bit, but only when it is not already right.
+
+        The pointer sits still for whole seconds at a time, and this runs 25
+        times a second: without the comparison it would be writing a window
+        style on nearly every one of them.
+
+        The window is looked up here rather than in ``__init__`` because Tk
+        builds the toplevel that carries the style lazily — before the window is
+        realised there is no such window to find, and the handle that answers is
+        a different one that would take the bit and do nothing with it. A lookup
+        that fails is simply dropped and tried again on the next tick, which is
+        also what happens if Tk ever replaces the window underneath us.
+        """
+        if through is self._click_through_on:
+            return
+        if self._click_through_handle is None:
+            self._click_through_handle = _layered_toplevel(self._root)
+        if self._click_through_handle and _set_click_through(
+            self._click_through_handle, through
+        ):
+            self._click_through_on = through
+        else:
+            self._click_through_handle = None
+
+    def _was_a_click(self, event: tk.Event) -> bool:
+        """End the gesture, and say whether it was a press rather than a drag.
+
+        Every button the widget has serves both — a button is the only solid
+        thing left to move the window by — so each one ends here, and a hand is
+        never perfectly still, which is why the answer is a tolerance rather than
+        an equality.
+        """
+        origin, self._drag_origin = self._drag_origin, None
+        self._drag_offset = None
+        return origin is None or (
+            abs(event.x_root - origin[0]) <= _CLOSE_DRAG_SLOP
+            and abs(event.y_root - origin[1]) <= _CLOSE_DRAG_SLOP
+        )
+
+    def _release_close(self, event: tk.Event) -> None:
+        """Close, unless the press this ends was really a drag of the window."""
+        if self._was_a_click(event):
+            self.close()
+
+    def _release_minimize(self, event: tk.Event) -> None:
+        """Shrink to the bar, unless the press this ends was really a drag."""
+        if self._was_a_click(event):
+            self.minimize()
+
+    def _release_restore(self, event: tk.Event) -> None:
+        """Come back to the full face, unless this was really a drag."""
+        if self._was_a_click(event):
+            self.restore()
+
     def _start_drag(self, event: tk.Event) -> None:
-        """Remember where inside the window the drag began."""
+        """Remember where inside the window, and on screen, the drag began."""
         self._drag_offset = (event.x, event.y)
+        self._drag_origin = (event.x_root, event.y_root)
+
+    def _end_drag(self, _event: tk.Event) -> None:
+        """Forget the gesture, so the widget may stop taking clicks again.
+
+        A press with no matching release would leave `_click_through_tick`
+        believing a drag is still in progress and holding the window solid for
+        good — Tk's implicit grab is what guarantees this arrives.
+        """
+        self._drag_offset = None
+        self._drag_origin = None
 
     def _drag(self, event: tk.Event) -> None:
         """Move the window, keeping the grabbed point under the pointer."""

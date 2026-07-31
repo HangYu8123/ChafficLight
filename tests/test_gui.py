@@ -20,16 +20,22 @@ import pytest
 
 from cli_traffic_light.claude import _default_proc_info
 from cli_traffic_light.gui import (
+    _CLOSE_DRAG_SLOP,
     _CLOSE_FILL_COLOR,
     _CLOSE_TAG,
+    _GWL_EXSTYLE,
+    _WS_EX_TRANSPARENT,
     _DRAG_TAG,
     _KEY_COLOR,
     _LAMP_ORDER,
     _LIT_TEXT_COLOR,
     _OFF_FACE_STATES,
     _OPAQUE_BACKDROP,
+    _MINIMIZE_TAG,
+    _RESTORE_TAG,
     _UNLIT_COLORS,
     _UNLIT_TEXT_COLOR,
+    _BarLayout,
     _Layout,
     TrafficLightApp,
     _hex_to_rgb,
@@ -511,6 +517,82 @@ def test_token_total_and_rate_are_shown_under_the_light(tmp_path, monkeypatch, t
         app.stop()
 
 
+def _append_billed_record(transcript: Path, tag: str, stamp: float) -> None:
+    """One more billed assistant record, so a transcript has a rate at all.
+
+    A rate needs two samples that gained tokens; a fixture with one record
+    reports 0.0 whatever its state, which would let a filtering test pass
+    without filtering anything.
+    """
+    transcript.parent.mkdir(parents=True, exist_ok=True)
+    with transcript.open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "isSidechain": False,
+                    "requestId": f"req-{tag}",
+                    "timestamp": _iso(stamp),
+                    "message": {
+                        "id": f"msg-{tag}",
+                        "role": "assistant",
+                        "usage": {"input_tokens": 400, "output_tokens": 100},
+                    },
+                }
+            )
+            + "\n"
+        )
+
+
+def test_a_dark_green_lamp_means_zero_tokens_per_second(tmp_path, monkeypatch, tk_root):
+    """Only a turn in flight can bill tokens, so only RUNNING may add to the rate.
+
+    A rate ages with the silence after its last billed record rather than
+    stopping dead, so every *other* state carries the decaying tail of a burst
+    that is already over — a session for the minute after it finishes, an idle
+    one for the minute after its turn does. Summing those printed a speed under
+    three lamps reading zero, which is the reported "tok/s is non-zero when no
+    session is running". The two halves of the face now agree by construction.
+    """
+    claude_home = _build_homes(tmp_path, monkeypatch)
+    now = time.time()
+    # An idle session and a finished one, both with a burst recent enough that
+    # each really does report a rate of its own.
+    live = claude_home / "projects" / "-work-gui" / "gui-sess.jsonl"
+    _append_billed_record(live, "gui-2", now - 10)
+    gone = claude_home / "projects" / "-work-gone" / "gone-sess.jsonl"
+    _append_billed_record(gone, "gone-1", now - 20)
+    _append_billed_record(gone, "gone-2", now - 10)
+    _write_session_file(claude_home, "idle")
+
+    app = TrafficLightApp(tk_root, Monitor(), refresh_ms=50_000)
+    try:
+        app.refresh()
+        tk_root.update_idletasks()
+
+        # Non-vacuity: both fixtures really are non-RUNNING sessions really
+        # reporting a rate, so the assertion below is about the filtering and
+        # not about there being nothing to filter.
+        by_id = {s.session_id: s for s in Monitor().snapshot()}
+        assert by_id["gui-sess"].state is SessionState.IDLE
+        assert by_id["gone-sess"].state in _OFF_FACE_STATES
+        assert by_id["gui-sess"].tokens_per_sec > 0
+        assert by_id["gone-sess"].tokens_per_sec > 0
+
+        assert app.lamps()[SessionState.RUNNING]["text"] == "0"
+        assert app.stats()["rate"] == "0.0 tok/s"
+
+        # And the filter is not simply a hardcoded zero: light the green lamp
+        # on the same transcripts and the figure comes back.
+        _write_session_file(claude_home, "busy")
+        app.refresh()
+        tk_root.update_idletasks()
+        assert app.lamps()[SessionState.RUNNING]["text"] == "1"
+        assert app.stats()["rate"] != "0.0 tok/s"
+    finally:
+        app.stop()
+
+
 def test_repainting_does_not_accumulate_canvas_items(tmp_path, monkeypatch, tk_root):
     """Canvas items are not garbage collected, so the light must reuse them.
 
@@ -793,3 +875,449 @@ def test_stop_cancels_every_pending_after_callback(tmp_path, monkeypatch, tk_roo
         app.stop()
     remaining = set(tk_root.tk.splitlist(tk_root.tk.call("after", "info")))
     assert remaining - before == set()
+
+
+def test_only_the_close_button_is_solid(tmp_path, monkeypatch, tk_root):
+    """The whole widget passes clicks on except the ✕, which must not.
+
+    The region tested is the ✕'s canvas *item*, not the disc drawn inside it: a
+    canvas dispatches a click to any item whose rectangle covers the pointer, so
+    a smaller region would leave a ring that closes the window when clicked and
+    is nonetheless passed through to whatever is underneath.
+    """
+    _build_homes(tmp_path, monkeypatch)
+    app = TrafficLightApp(tk_root, Monitor(), refresh_ms=50_000)
+    try:
+        layout = app._layout
+        assert app._pointer_over_close(layout.close_center_x, layout.close_center_y)
+        # The corners of the item are still the item.
+        for corner_x in (-layout.close_half, layout.close_half):
+            for corner_y in (-layout.close_half, layout.close_half):
+                assert app._pointer_over_close(
+                    layout.close_center_x + corner_x, layout.close_center_y + corner_y
+                )
+        # Everything the light is actually made of is not.
+        for index in range(len(_LAMP_ORDER)):
+            assert not app._pointer_over_close(
+                layout.lamp_center_x(index), layout.lamp_center_y
+            )
+        for figure_y in (layout.tokens_center_y, layout.rate_center_y):
+            assert not app._pointer_over_close(layout.center_x, figure_y)
+        assert not app._pointer_over_close(
+            layout.close_center_x - layout.close_half - 1, layout.close_center_y
+        )
+        assert not app._pointer_over_close(0, 0)
+    finally:
+        app.stop()
+
+
+def test_click_through_is_only_claimed_on_a_window_that_can_do_it(
+    tmp_path, monkeypatch, tk_root
+):
+    """Passing clicks on is a property of a *layered* window, not of a platform.
+
+    Microsoft documents `WS_EX_TRANSPARENT` as overriding the hit-testing of a
+    layered window, and layered is what `-transparentcolor` made it — so the
+    honest coupling is with `transparent`, and asserting that keeps this
+    meaningful everywhere instead of skipping off Windows.
+    """
+    _build_homes(tmp_path, monkeypatch)
+    app = TrafficLightApp(tk_root, Monitor(), refresh_ms=50_000)
+    try:
+        if app.click_through:
+            assert app.transparent
+        if sys.platform != "win32":
+            assert app.click_through is False
+        else:
+            # Where the backdrop test already requires the key to be accepted,
+            # the window is layered and this must follow — otherwise the suite
+            # would pass with the feature silently switched off.
+            assert app.click_through
+    finally:
+        app.stop()
+
+
+def test_the_window_takes_clicks_only_while_the_pointer_is_on_the_close_button(
+    tmp_path, monkeypatch, tk_root
+):
+    """Read back off the window itself: what the OS will do with the next click.
+
+    The style bit is the whole mechanism, so this asserts the bit rather than
+    the bookkeeping around it. Guarded on the capability rather than skipped,
+    like the backdrop test above it.
+    """
+    _build_homes(tmp_path, monkeypatch)
+    app = TrafficLightApp(tk_root, Monitor(), refresh_ms=50_000)
+    try:
+        if not app.click_through:
+            return
+        # Tk builds the window that carries the style lazily, so until this the
+        # app has nothing to set the bit on — and neither would a reader here.
+        tk_root.update_idletasks()
+        import ctypes
+
+        get_style = getattr(
+            ctypes.windll.user32, "GetWindowLongPtrW", ctypes.windll.user32.GetWindowLongW
+        )
+        get_style.restype = ctypes.c_ssize_t
+        get_style.argtypes = [ctypes.c_void_p, ctypes.c_int]
+
+        def passes_clicks_on() -> bool:
+            assert app._click_through_handle, "no layered window was ever found"
+            style = get_style(app._click_through_handle, _GWL_EXSTYLE)
+            return bool(style & _WS_EX_TRANSPARENT)
+
+        layout = app._layout
+        for offset, expected in (
+            ((layout.close_center_x, layout.close_center_y), False),
+            ((layout.lamp_center_x(0), layout.lamp_center_y), True),
+        ):
+            monkeypatch.setattr(
+                tk_root,
+                "winfo_pointerxy",
+                lambda offset=offset: (
+                    tk_root.winfo_rootx() + offset[0],
+                    tk_root.winfo_rooty() + offset[1],
+                ),
+            )
+            app._click_through_tick()
+            assert passes_clicks_on() is expected, offset
+    finally:
+        app.stop()
+
+
+def test_a_drag_that_started_on_the_close_button_moves_instead_of_closing(
+    tmp_path, monkeypatch, tk_root
+):
+    """The ✕ is the only solid part left, so it has to serve both gestures.
+
+    Its own root would be destroyed by a close, which is exactly what must not
+    happen here — the shared fixture is safe precisely because this asserts the
+    window survives.
+    """
+    _build_homes(tmp_path, monkeypatch)
+    app = TrafficLightApp(tk_root, Monitor(), refresh_ms=50_000)
+    try:
+        assert "<Button-1>" in app._canvas.tag_bind(_CLOSE_TAG)
+        assert "<B1-Motion>" in app._canvas.tag_bind(_CLOSE_TAG)
+        tk_root.geometry("+300+200")
+        tk_root.update_idletasks()
+        app._start_drag(_StubEvent(10, 10, 310, 210))
+        app._drag(_StubEvent(10, 10, 400, 300))
+        app._release_close(_StubEvent(10, 10, 400, 300))
+        tk_root.update_idletasks()
+        assert tk_root.winfo_exists()
+        assert tk_root.geometry().endswith("+390+290")
+        # And the gesture is over, so the widget may pass clicks on again.
+        assert app._drag_offset is None
+    finally:
+        app.stop()
+
+
+def test_a_press_that_does_not_move_still_closes_the_window(tmp_path, monkeypatch):
+    """Its own root: the shared fixture would destroy an already-dead one.
+
+    A hand is never perfectly still, so a click is only distinguishable from a
+    drag by a tolerance — which means the tolerance itself has to be a click.
+    """
+    _build_homes(tmp_path, monkeypatch)
+    root = tkinter.Tk()
+    root.withdraw()
+    app = TrafficLightApp(root, Monitor(), refresh_ms=50_000)
+    app._start_drag(_StubEvent(10, 10, 310, 210))
+    app._release_close(_StubEvent(10, 10, 310 + _CLOSE_DRAG_SLOP, 210))
+    with pytest.raises(tkinter.TclError):
+        root.winfo_exists()
+
+
+def test_a_finished_gesture_lets_the_widget_pass_clicks_on_again(
+    tmp_path, monkeypatch, tk_root
+):
+    """A press with no release would hold the window solid for good.
+
+    `_click_through_tick` leaves the style alone mid-drag, so the release is the
+    only thing that can end that — and nothing else in the app clears it.
+    """
+    _build_homes(tmp_path, monkeypatch)
+    app = TrafficLightApp(tk_root, Monitor(), refresh_ms=50_000)
+    try:
+        app._start_drag(_StubEvent(40, 30, 340, 230))
+        assert app._drag_offset is not None
+        app._end_drag(_StubEvent(40, 30, 340, 230))
+        assert app._drag_offset is None
+        assert app._drag_origin is None
+    finally:
+        app.stop()
+
+
+def test_the_minimize_button_shrinks_the_widget_to_the_bar(
+    tmp_path, monkeypatch, tk_root
+):
+    """The ─ swaps which of the two sizes is on screen, and the window follows.
+
+    Two separate things have to be true and only one of them is the packing.
+    Tk documents a toplevel whose geometry has been set — which `_drag` does on
+    every move — as no longer following the size its children ask for, so the
+    size is *also* set outright; a bar drawn inside a face-sized window is a
+    widget that never got smaller. The size actually granted cannot be read back
+    here (a withdrawn window reports whatever it last mapped at), so what is
+    asserted is the pair either side of that: the size the window now asks for,
+    and the size the app demanded.
+    """
+    _build_homes(tmp_path, monkeypatch)
+    app = TrafficLightApp(tk_root, Monitor(), refresh_ms=50_000)
+    try:
+        assert app.minimized is False
+        bar, face = app._bar_layout, app._layout
+        assert (bar.width, bar.height) < (face.width, face.height)
+
+        asked: list[str] = []
+        granted = tk_root.geometry
+
+        def spy(spec=None):
+            if spec is None:
+                return granted()
+            asked.append(spec)
+            return granted(spec)
+
+        monkeypatch.setattr(tk_root, "geometry", spy)
+
+        app.minimize()
+        tk_root.update_idletasks()
+        assert app.minimized is True
+        assert app._bar_canvas.winfo_manager() == "pack"
+        assert app._canvas.winfo_manager() == ""
+        assert (tk_root.winfo_reqwidth(), tk_root.winfo_reqheight()) == (
+            bar.width,
+            bar.height,
+        )
+        assert asked[-1].startswith(f"{bar.width}x{bar.height}+")
+
+        app.restore()
+        tk_root.update_idletasks()
+        assert app.minimized is False
+        assert app._canvas.winfo_manager() == "pack"
+        assert app._bar_canvas.winfo_manager() == ""
+        assert (tk_root.winfo_reqwidth(), tk_root.winfo_reqheight()) == (
+            face.width,
+            face.height,
+        )
+        assert asked[-1].startswith(f"{face.width}x{face.height}+")
+    finally:
+        app.stop()
+
+
+def test_the_minimize_button_is_opaque_and_on_top(tmp_path, monkeypatch, tk_root):
+    """Same two ways to draw an unclickable button as the ✕ has.
+
+    A keyed pixel is click-through rather than merely invisible, and a canvas
+    hands a click to the topmost item — and the ─ sits in the corner above the
+    red lamp, whose own tile reaches under it. Either mistake leaves a button
+    that is drawn, bound and dead.
+    """
+    _build_homes(tmp_path, monkeypatch)
+    app = TrafficLightApp(tk_root, Monitor(), refresh_ms=50_000)
+    try:
+        items = set(app._canvas.find_withtag(_MINIMIZE_TAG))
+        assert len(items) == 1
+        photo = app._images[app._canvas.itemcget(next(iter(items)), "image")]
+        middle = app._layout.close_half
+        reach = app._layout.close_radius // 2
+        painted = [
+            _hex_to_rgb(_photo_pixel(photo, middle + dx, middle + dy))
+            for dx in range(-reach, reach + 1)
+            for dy in range(-reach, reach + 1)
+        ]
+        assert _hex_to_rgb(_KEY_COLOR) not in painted
+        assert min(sum(pixel) for pixel in painted) > sum(_hex_to_rgb(_CLOSE_FILL_COLOR)) / 2
+
+        x, y = app._layout.minimize_center_x, app._layout.minimize_center_y
+        under_the_pointer = app._canvas.find_overlapping(x - 1, y - 1, x + 1, y + 1)
+        assert under_the_pointer[-1] in items
+        assert "<ButtonRelease-1>" in app._canvas.tag_bind(_MINIMIZE_TAG)
+    finally:
+        app.stop()
+
+
+def test_the_minimize_button_clears_the_lamp_beside_it_and_the_corner_above_it():
+    """The mirror of the ✕, and it has the same two ways to be misplaced.
+
+    Overlapping the first lamp hides part of a count; straying outside the
+    rounded corner puts half the button on the keyed backdrop, where it is
+    see-through. Checked on the layout rather than on a window, so it holds at
+    every display scale the arithmetic can produce.
+    """
+    layout = _Layout(1.0)
+    from_lamp = math.dist(
+        (layout.minimize_center_x, layout.minimize_center_y),
+        (layout.lamp_center_x(0), layout.lamp_center_y),
+    )
+    assert from_lamp >= layout.lamp_radius + layout.close_radius
+
+    left, _top, _right, _bottom = layout.housing_box()
+    corner = (left + layout.housing_radius, layout.pad + layout.housing_radius)
+    from_corner = math.dist(
+        (layout.minimize_center_x, layout.minimize_center_y), corner
+    )
+    assert from_corner + layout.close_radius <= layout.housing_radius
+
+
+def test_the_bar_shows_the_same_lamps_and_the_same_rate(tmp_path, monkeypatch, tk_root):
+    """The bar is the same light, smaller — not a second reading of the sessions.
+
+    It is painted on every repaint whether or not it is showing, so what this
+    really pins is that the hidden size is already right: a bar that were only
+    filled in on the way down would show the light as it was one refresh ago,
+    which is the whole point of a status widget being wrong.
+    """
+    claude_home = _build_homes(tmp_path, monkeypatch)
+    _write_session_file(claude_home, "waiting")
+    _add_idle_codex_session(tmp_path / "codex_home")
+    app = TrafficLightApp(tk_root, Monitor(), refresh_ms=50_000)
+    try:
+        app.refresh()
+        tk_root.update_idletasks()
+        # Still expanded, and the bar already agrees with the face.
+        assert app.minimized is False
+        for state in _LAMP_ORDER:
+            assert app.bar()["lamps"][state] == app.lamps()[state]["fill"], state
+        assert app.bar()["rate"] == app.stats()["rate"]
+        # Two of the three are lit here, so this is not passing on three dark
+        # lamps agreeing with three dark lamps.
+        assert app.bar()["lamps"][SessionState.NEEDS_INPUT] == STATE_COLORS[
+            SessionState.NEEDS_INPUT
+        ]
+        assert app.bar()["lamps"][SessionState.IDLE] == STATE_COLORS[SessionState.IDLE]
+        assert app.bar()["lamps"][SessionState.RUNNING] == _UNLIT_COLORS[
+            SessionState.RUNNING
+        ]
+        # And the rate is a real figure rather than an empty string.
+        assert app.bar()["rate"].endswith(" tok/s")
+
+        app.minimize()
+        _write_session_file(claude_home, "busy")
+        app.refresh()
+        tk_root.update_idletasks()
+        # Minimized, the face is the hidden one and it is the bar that must be
+        # following the sessions.
+        assert app.bar()["lamps"][SessionState.RUNNING] == STATE_COLORS[
+            SessionState.RUNNING
+        ]
+        assert app.bar()["lamps"][SessionState.NEEDS_INPUT] == _UNLIT_COLORS[
+            SessionState.NEEDS_INPUT
+        ]
+    finally:
+        app.stop()
+
+
+def test_clicking_the_little_light_restores_it_but_dragging_it_does_not(
+    tmp_path, monkeypatch, tk_root
+):
+    """The bar has no button, so the light is one — and it still has to drag.
+
+    Both gestures start on the same item, exactly as they do on the ✕, so the
+    press that moves the bar across the desktop must not also throw the full
+    face back up when it lands.
+    """
+    _build_homes(tmp_path, monkeypatch)
+    app = TrafficLightApp(tk_root, Monitor(), refresh_ms=50_000)
+    try:
+        app.minimize()
+        assert app.minimized
+
+        # A press that travelled is a drag: the bar stays a bar.
+        app._start_drag(_StubEvent(20, 20, 320, 220))
+        app._release_restore(_StubEvent(20, 20, 320 + _CLOSE_DRAG_SLOP + 1, 220))
+        assert app.minimized is True
+
+        # A press that stayed put — within the tolerance a hand can hold — is a
+        # click, and brings the face back.
+        app._start_drag(_StubEvent(20, 20, 320, 220))
+        app._release_restore(_StubEvent(20, 20, 320 + _CLOSE_DRAG_SLOP, 220))
+        assert app.minimized is False
+        assert "<ButtonRelease-1>" in app._bar_canvas.tag_bind(_RESTORE_TAG)
+    finally:
+        app.stop()
+
+
+def test_the_widget_takes_clicks_on_whatever_is_a_button_at_the_time(
+    tmp_path, monkeypatch, tk_root
+):
+    """The solid list is the widget as far as the mouse is concerned.
+
+    A button left out of it is drawn, bound and passed straight through to
+    whatever is underneath — and the list has to change with the size, since the
+    bar's only affordance is the little light and the face's two buttons are not
+    even on the window any more.
+    """
+    _build_homes(tmp_path, monkeypatch)
+    app = TrafficLightApp(tk_root, Monitor(), refresh_ms=50_000)
+    try:
+        layout = app._layout
+        assert app._pointer_over_solid(layout.close_center_x, layout.close_center_y)
+        assert app._pointer_over_solid(
+            layout.minimize_center_x, layout.minimize_center_y
+        )
+        # The light itself is not a button while the face is up: its counts are
+        # a reading, not something to press.
+        assert not app._pointer_over_solid(layout.lamp_center_x(1), layout.lamp_center_y)
+        assert not app._pointer_over_solid(layout.center_x, layout.tokens_center_y)
+
+        app.minimize()
+        bar = app._bar_layout
+        for index in range(len(_LAMP_ORDER)):
+            assert app._pointer_over_solid(bar.lamp_center_x(index), bar.lamp_center_y)
+        # The rate beside it is not: the bar passes clicks on everywhere the
+        # little light is not.
+        assert not app._pointer_over_solid(bar.rate_center_x, bar.rate_center_y)
+        # And the face's buttons are gone with the face, rather than leaving a
+        # solid patch on a window that no longer draws anything there.
+        assert not app._pointer_over_solid(
+            layout.close_center_x, layout.close_center_y
+        )
+    finally:
+        app.stop()
+
+
+def test_toggling_the_size_does_not_accumulate_canvas_items(
+    tmp_path, monkeypatch, tk_root
+):
+    """Both sizes are built once, so a toggle may only change which is packed.
+
+    Canvas items are not garbage collected: a bar rebuilt on every minimize
+    would pile up behind the visible one, and the growth is invisible until the
+    widget has been up for an afternoon.
+    """
+    _build_homes(tmp_path, monkeypatch)
+    app = TrafficLightApp(tk_root, Monitor(), refresh_ms=50_000)
+    try:
+        app.refresh()
+        tk_root.update_idletasks()
+        before = (len(app._canvas.find_all()), len(app._bar_canvas.find_all()))
+        for _ in range(3):
+            app.minimize()
+            app.refresh()
+            app.restore()
+            app.refresh()
+        tk_root.update_idletasks()
+        assert (len(app._canvas.find_all()), len(app._bar_canvas.find_all())) == before
+    finally:
+        app.stop()
+
+
+def test_the_bar_is_scaled_to_the_display_like_the_face_is(tk_root):
+    """The second size has to follow the display too, or it is sharp and tiny.
+
+    Same ratio check the face gets, plus the tiling rule `_Face` depends on: a
+    lamp's tile is its radius and its glow, and neighbouring tiles must meet
+    rather than overlap, or each would clip the one beside it.
+    """
+    single, double = _BarLayout(1.0), _BarLayout(2.0)
+    for name in ("width", "height", "lamp_radius", "lamp_pitch", "rate_font_px"):
+        assert getattr(double, name) == pytest.approx(
+            2 * getattr(single, name), abs=2
+        ), name
+    assert single.tile_half <= single.lamp_pitch / 2
+    assert single.lamp_radius < single.tile_half
+    # Nothing may be laid out past the housing it is drawn on.
+    assert single.rate_center_x + single.rate_width // 2 <= single.pad + single.housing_width

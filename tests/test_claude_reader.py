@@ -280,7 +280,10 @@ def test_missing_proc_start_never_forces_finished(tmp_path, monkeypatch):
     )
     sessions = ClaudeReader(home, now=lambda: NOW).read_sessions()
     assert len(sessions) == 1
-    assert sessions[0].state == SessionState.RUNNING
+    # IDLE is what "shell" maps to; what this test is about is that it is not
+    # FINISHED, which is what a session whose pid failed the liveness check gets.
+    assert sessions[0].state == SessionState.IDLE
+    assert sessions[0].state != SessionState.FINISHED
 
 
 def test_waiting_session_needs_input(tmp_path, monkeypatch):
