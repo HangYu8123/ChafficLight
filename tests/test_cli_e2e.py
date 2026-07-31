@@ -162,7 +162,8 @@ def test_once_json_reports_state_and_tokens_per_session(tmp_path, monkeypatch, c
     assert by_id["cli-claude"]["total_tokens"] == 125
     assert by_id["cli-codex"]["total_tokens"] == 650
     assert isinstance(by_id["cli-claude"]["is_vscode"], bool)
-    assert isinstance(by_id["cli-codex"]["tokens_per_sec"], float)
+    assert by_id["cli-claude"]["tokens_per_sec"] is None
+    assert by_id["cli-codex"]["tokens_per_sec"] == 0.0
 
 
 def test_once_json_reports_agent_cwd_and_totals(tmp_path, monkeypatch, capsys):

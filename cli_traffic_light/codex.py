@@ -13,13 +13,30 @@ import time
 from pathlib import Path
 
 from .jsonl import parse_iso, read_jsonl
-from .state import Session, codex_events_to_state, is_stale
-from .tokens import TokenUsage, codex_usage_from_total, tokens_per_second
+from .state import Session, SessionState, codex_events_to_state, is_stale
+from .tokens import TokenUsage, codex_usage_from_total
 
 __all__ = ["CodexReader"]
 
 #: Rollout events that mark a turn boundary; the last one seen drives the state.
 _TURN_EVENTS = ("task_started", "task_complete", "turn_aborted")
+
+
+def _observed_output_rate(samples: list[tuple[float, int]]) -> float | None:
+    """Latest observed output-token delta per second, if one is measurable.
+
+    Codex's token-count events are cumulative snapshots, not token emission
+    timestamps. Their interval therefore supports an observed output throughput,
+    not a claim about the model's decode speed. Sorting here keeps out-of-order
+    records from changing either the interval or its sign.
+    """
+    latest = None
+    ordered = sorted(samples)
+    for (start, earlier), (end, later) in zip(ordered, ordered[1:]):
+        elapsed = end - start
+        if elapsed > 0 and later > earlier:
+            latest = (later - earlier) / elapsed
+    return latest
 
 
 def _scan_events(records: list[dict]) -> tuple[str | None, TokenUsage, list[tuple[float, int]]]:
@@ -34,6 +51,11 @@ def _scan_events(records: list[dict]) -> tuple[str | None, TokenUsage, list[tupl
         event_type = payload.get("type")
         if event_type in _TURN_EVENTS:
             last_turn_event = event_type
+            if event_type == "task_started":
+                # Never divide across the user's wait between two turns. The
+                # first current-turn sample is only a baseline; a second one is
+                # required before this turn has an observable interval.
+                rate_samples = []
         elif event_type == "token_count":
             total = (payload.get("info") or {}).get("total_token_usage")
             if total is None:
@@ -41,7 +63,9 @@ def _scan_events(records: list[dict]) -> tuple[str | None, TokenUsage, list[tupl
             # These records are cumulative, so the last one is the session
             # total and successive ones give the rate — they are never summed.
             usage = codex_usage_from_total(total)
-            rate_samples.append((parse_iso(record.get("timestamp")) or 0.0, usage.total_tokens))
+            timestamp = parse_iso(record.get("timestamp"))
+            if timestamp is not None:
+                rate_samples.append((timestamp, usage.output_tokens))
     return last_turn_event, usage, rate_samples
 
 
@@ -94,14 +118,21 @@ class CodexReader:
 
         last_turn_event, usage, rate_samples = _scan_events(records)
         session_id = meta.get("session_id")
+        state = codex_events_to_state(last_turn_event, mtime, now)
+        if state is SessionState.RUNNING:
+            rate = _observed_output_rate(rate_samples)
+        elif state is SessionState.UNKNOWN:
+            rate = None
+        else:
+            rate = 0.0
         return Session(
             session_id=session_id,
             agent="codex",
             title=thread_names.get(session_id, session_id),
             cwd=meta.get("cwd", ""),
-            state=codex_events_to_state(last_turn_event, mtime, now),
+            state=state,
             usage=usage,
-            tokens_per_sec=tokens_per_second(rate_samples, now),
+            tokens_per_sec=rate,
             is_vscode=False,
             vscode_confidence="none",
             last_activity=mtime,

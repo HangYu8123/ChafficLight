@@ -34,7 +34,11 @@ def _session_payload(session: Session) -> dict:
         "title": session.title,
         "cwd": session.cwd,
         "state": session.state.value,
-        "tokens_per_sec": round(session.tokens_per_sec, 3),
+        "tokens_per_sec": (
+            None
+            if session.tokens_per_sec is None
+            else round(session.tokens_per_sec, 3)
+        ),
         "is_vscode": session.is_vscode,
         "vscode_confidence": session.vscode_confidence,
         "pid": session.pid,

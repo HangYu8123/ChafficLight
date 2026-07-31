@@ -19,7 +19,12 @@ lamp is how many sessions are in that state:
 | 🟢 green | running — the agent is working and wants nothing from you |
 
 
-Underneath the lamps are the tokens spent since the app started, and the current tokens/sec, a good way to see how fast you are burning your tokens!
+Underneath the lamps are the tokens spent since the app started and the latest
+observable output-token rate. Codex supplies timed cumulative output snapshots,
+so ChafficLight can show their most recent interval in tok/s. Claude Code
+transcripts record token counts but not the generation interval; while any running
+session has no measurable rate, the widget shows **— tok/s** instead of inventing
+zero. **0.0 tok/s** therefore means no session is running.
 
 Try the minimize feature if your just want to see the lights (single click on the lights to reverse). 
 
@@ -28,9 +33,9 @@ Try the minimize feature if your just want to see the lights (single click on th
 </p>
 
 Press the **─** in the top-left corner to shrink it to a bar — the same three lamps at a
-glance, with the tokens/sec beside them. Click the little traffic light to bring the full
-window back; dragging it just moves it, as always. There is no **✕** on the bar, so closing
-from there is two steps: come back first, then press it.
+glance, with the observable tok/s figure beside them. Click the little traffic light to
+bring the full window back; dragging it just moves it, as always. There is no **✕** on the
+bar, so closing from there is two steps: come back first, then press it.
 
 <p align="center">
   <img src="docs/chafficlight-bar.png" alt="ChafficLight minimized to a bar" width="220">

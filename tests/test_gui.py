@@ -191,6 +191,61 @@ def _add_idle_codex_session(codex_home: Path) -> None:
     )
 
 
+def _add_running_codex_session(codex_home: Path) -> None:
+    """A running rollout with an observed 3 output-token/s interval."""
+    now = time.time()
+    rollout = codex_home / "sessions" / "2026" / "07" / "29" / "rollout-running.jsonl"
+    rollout.parent.mkdir(parents=True, exist_ok=True)
+    rollout.write_text(
+        "".join(
+            json.dumps(record) + "\n"
+            for record in (
+                {
+                    "timestamp": _iso(now - 90),
+                    "type": "session_meta",
+                    "payload": {
+                        "session_id": "gui-codex-running",
+                        "cwd": "/work/gui-codex-running",
+                        "thread_source": "cli",
+                    },
+                },
+                {
+                    "timestamp": _iso(now - 80),
+                    "type": "event_msg",
+                    "payload": {"type": "task_started"},
+                },
+                {
+                    "timestamp": _iso(now - 30),
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "token_count",
+                        "info": {
+                            "total_token_usage": {
+                                "input_tokens": 1_000,
+                                "output_tokens": 10,
+                            }
+                        },
+                    },
+                },
+                {
+                    "timestamp": _iso(now - 10),
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "token_count",
+                        "info": {
+                            "total_token_usage": {
+                                "input_tokens": 5_000,
+                                "output_tokens": 70,
+                            }
+                        },
+                    },
+                },
+            )
+        ),
+        encoding="utf-8",
+    )
+
+
 def test_lamp_counts_and_lit_state_follow_the_sessions(tmp_path, monkeypatch, tk_root):
     claude_home = _build_homes(tmp_path, monkeypatch)
     app = TrafficLightApp(tk_root, Monitor(), refresh_ms=50_000)
@@ -508,61 +563,17 @@ def test_token_total_and_rate_are_shown_under_the_light(tmp_path, monkeypatch, t
         # Only the 80 + 20 that arrived while the window was open, not the
         # 100 + 20 + 5 that was already there.
         assert stats["tokens"] == "100 tokens"
-        # The rate is unaffected by the reset: it has always been the newest
-        # step between two readings, and that step is spread across the whole
-        # 30 s since the record it is measured from — the 10 s between the two
-        # plus the 20 s of silence since.
-        assert stats["rate"] == "3.3 tok/s"
+        # Claude's completion-stamped records do not reveal how long either
+        # response spent generating, so the rate is unknown rather than a
+        # billing-total delta divided by the gap between them.
+        assert stats["rate"] == "— tok/s"
     finally:
         app.stop()
 
 
-def _append_billed_record(transcript: Path, tag: str, stamp: float) -> None:
-    """One more billed assistant record, so a transcript has a rate at all.
-
-    A rate needs two samples that gained tokens; a fixture with one record
-    reports 0.0 whatever its state, which would let a filtering test pass
-    without filtering anything.
-    """
-    transcript.parent.mkdir(parents=True, exist_ok=True)
-    with transcript.open("a", encoding="utf-8") as handle:
-        handle.write(
-            json.dumps(
-                {
-                    "type": "assistant",
-                    "isSidechain": False,
-                    "requestId": f"req-{tag}",
-                    "timestamp": _iso(stamp),
-                    "message": {
-                        "id": f"msg-{tag}",
-                        "role": "assistant",
-                        "usage": {"input_tokens": 400, "output_tokens": 100},
-                    },
-                }
-            )
-            + "\n"
-        )
-
-
-def test_a_dark_green_lamp_means_zero_tokens_per_second(tmp_path, monkeypatch, tk_root):
-    """Only a turn in flight can bill tokens, so only RUNNING may add to the rate.
-
-    A rate ages with the silence after its last billed record rather than
-    stopping dead, so every *other* state carries the decaying tail of a burst
-    that is already over — a session for the minute after it finishes, an idle
-    one for the minute after its turn does. Summing those printed a speed under
-    three lamps reading zero, which is the reported "tok/s is non-zero when no
-    session is running". The two halves of the face now agree by construction.
-    """
+def test_rate_distinguishes_zero_observed_and_unknown(tmp_path, monkeypatch, tk_root):
+    """Zero is reserved for no running work; missing telemetry is an em dash."""
     claude_home = _build_homes(tmp_path, monkeypatch)
-    now = time.time()
-    # An idle session and a finished one, both with a burst recent enough that
-    # each really does report a rate of its own.
-    live = claude_home / "projects" / "-work-gui" / "gui-sess.jsonl"
-    _append_billed_record(live, "gui-2", now - 10)
-    gone = claude_home / "projects" / "-work-gone" / "gone-sess.jsonl"
-    _append_billed_record(gone, "gone-1", now - 20)
-    _append_billed_record(gone, "gone-2", now - 10)
     _write_session_file(claude_home, "idle")
 
     app = TrafficLightApp(tk_root, Monitor(), refresh_ms=50_000)
@@ -570,25 +581,23 @@ def test_a_dark_green_lamp_means_zero_tokens_per_second(tmp_path, monkeypatch, t
         app.refresh()
         tk_root.update_idletasks()
 
-        # Non-vacuity: both fixtures really are non-RUNNING sessions really
-        # reporting a rate, so the assertion below is about the filtering and
-        # not about there being nothing to filter.
-        by_id = {s.session_id: s for s in Monitor().snapshot()}
-        assert by_id["gui-sess"].state is SessionState.IDLE
-        assert by_id["gone-sess"].state in _OFF_FACE_STATES
-        assert by_id["gui-sess"].tokens_per_sec > 0
-        assert by_id["gone-sess"].tokens_per_sec > 0
-
         assert app.lamps()[SessionState.RUNNING]["text"] == "0"
         assert app.stats()["rate"] == "0.0 tok/s"
 
-        # And the filter is not simply a hardcoded zero: light the green lamp
-        # on the same transcripts and the figure comes back.
-        _write_session_file(claude_home, "busy")
+        # A provider with two timed cumulative output samples is measurable.
+        _add_running_codex_session(tmp_path / "codex_home")
         app.refresh()
         tk_root.update_idletasks()
         assert app.lamps()[SessionState.RUNNING]["text"] == "1"
-        assert app.stats()["rate"] != "0.0 tok/s"
+        assert app.stats()["rate"] == "3.0 tok/s"
+
+        # Adding running Claude work makes the aggregate unknown. Printing the
+        # Codex term alone would silently count Claude as zero.
+        _write_session_file(claude_home, "busy")
+        app.refresh()
+        tk_root.update_idletasks()
+        assert app.lamps()[SessionState.RUNNING]["text"] == "2"
+        assert app.stats()["rate"] == "— tok/s"
     finally:
         app.stop()
 

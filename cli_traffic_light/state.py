@@ -86,7 +86,9 @@ class Session:
     cwd: str
     state: SessionState
     usage: TokenUsage
-    tokens_per_sec: float
+    # None means the state or provider timing cannot establish an output rate.
+    # States known not to be generating are exactly 0.0.
+    tokens_per_sec: float | None
     is_vscode: bool
     vscode_confidence: str
     last_activity: float

@@ -859,31 +859,23 @@ class TrafficLightApp:
         self._canvas.itemconfig(
             self._tokens_text, text=f"{totals.total_tokens:,} tokens"
         )
-        # Summed rather than recomputed off a pooled counter, so a session
-        # ending cannot drop a shared cumulative total and fake a negative
-        # interval. The terms are addable even though each is measured over its
-        # own newest step: they are speeds running side by side right now, and
-        # two sessions burning tokens at once do burn them at the combined rate.
-        #
-        # Over the RUNNING sessions alone. Only a turn in flight can be billing
-        # tokens, so this is what the figure claims to measure — and it is what
-        # makes the two halves of the face agree by construction: a dark green
-        # lamp now *means* zero, instead of merely tending towards it. A rate
-        # ages with the silence after its last billed record rather than
-        # stopping dead, so every other state carries the decaying tail of a
-        # burst that is already over: a finished session for the minute after
-        # it ends, and an idle one for the minute after its turn does. Summing
-        # those printed a speed under three lamps reading zero.
-        rate = sum(
-            session.tokens_per_sec
-            for session in sessions
-            if session.state is SessionState.RUNNING
-        )
-        rate_text = f"{rate:.1f} tok/s"
+        # A rate is addable only when every running session has one. Claude's
+        # transcript records token counts at completion but no generation
+        # interval, so treating its unknown contribution as zero would print a
+        # plausible-looking partial total while its green lamp is lit.
+        running = [
+            session for session in sessions if session.state is SessionState.RUNNING
+        ]
+        if not running:
+            rate_text = "0.0 tok/s"
+        elif any(session.tokens_per_sec is None for session in running):
+            rate_text = "— tok/s"
+        else:
+            rate = sum(session.tokens_per_sec for session in running)
+            rate_text = f"{rate:.1f} tok/s"
         self._canvas.itemconfig(self._rate_text, text=rate_text)
-        # The one figure the bar keeps: minimized, the question is still "how
-        # fast is this costing me?", where the running total is something to go
-        # and look at rather than to watch.
+        # The one figure the bar keeps: minimized, the latest observable output
+        # pace remains useful while the running total can wait for the full face.
         self._bar_canvas.itemconfig(self._bar_rate_text, text=rate_text)
 
     def lamps(self) -> dict[SessionState, dict[str, str]]:

@@ -20,7 +20,7 @@ import psutil
 
 from .jsonl import parse_iso, read_jsonl
 from .state import Session, SessionState, claude_status_to_state, is_stale
-from .tokens import TokenUsage, claude_usage_from_record, tokens_per_second
+from .tokens import TokenUsage, claude_usage_from_record
 
 __all__ = ["ClaudeReader"]
 
@@ -107,16 +107,6 @@ def _total_usage(samples: Iterable[tuple[float, TokenUsage]]) -> TokenUsage:
     for _, usage in samples:
         total.add(usage)
     return total
-
-
-def _rate(samples: list[tuple[float, TokenUsage]], now: float) -> float:
-    """Tokens/sec from the running cumulative total across ``samples``."""
-    cumulative = []
-    running = 0
-    for timestamp, usage in samples:
-        running += usage.total_tokens
-        cumulative.append((timestamp, running))
-    return tokens_per_second(cumulative, now)
 
 
 class ClaudeReader:
@@ -225,6 +215,11 @@ class ClaudeReader:
             if self._is_alive(record.get("pid"), record.get("procStart"))
             else SessionState.FINISHED
         )
+        rate = (
+            None
+            if state in (SessionState.RUNNING, SessionState.UNKNOWN)
+            else 0.0
+        )
         return Session(
             session_id=session_id,
             agent="claude",
@@ -232,7 +227,10 @@ class ClaudeReader:
             cwd=record.get("cwd", ""),
             state=state,
             usage=_total_usage(samples),
-            tokens_per_sec=_rate(samples, now),
+            # Claude records when a response completed, but not when generation
+            # started or ended. While it is running, a rate derived from gaps
+            # between records would mix generation with user and tool time.
+            tokens_per_sec=rate,
             is_vscode=False,
             vscode_confidence="none",
             last_activity=last_activity,
@@ -256,7 +254,7 @@ class ClaudeReader:
             cwd=cwd or path.parent.name.replace("-", "/"),
             state=SessionState.FINISHED,
             usage=_total_usage(samples),
-            tokens_per_sec=_rate(samples, now),
+            tokens_per_sec=0.0,
             is_vscode=False,
             vscode_confidence="none",
             last_activity=last_activity,

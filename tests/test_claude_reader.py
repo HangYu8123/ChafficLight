@@ -189,14 +189,47 @@ def test_session_name_surfaces_as_the_title(tmp_path, monkeypatch):
     assert live.title == "live one"
 
 
-def test_tokens_per_sec_uses_clamped_deltas_of_main_thread_records(tmp_path, monkeypatch):
+def test_running_rate_is_unknown_even_with_main_and_delegated_usage(
+    tmp_path, monkeypatch
+):
+    """Completion timestamps do not bound generation or delegated work.
+
+    The two main records, sidechain record, and subagent transcript make this
+    non-vacuous: the reader has plenty of token counts, but no generation
+    duration with which to turn any of them into output tokens per second.
+    """
     home = _build_home(tmp_path)
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home))
     live = _by_id(ClaudeReader(home, now=lambda: NOW).read_sessions())["sess-live"]
-    # The step onto 230 at NOW-20, over the 40 s since the record before it. The
-    # sidechain record at NOW-15 is worth 1,400 and would swamp this if it were
-    # not excluded, so the number is what tells the two apart.
-    assert live.tokens_per_sec == pytest.approx(230.0 / 40.0)
+    assert live.usage.total_tokens == 355
+    assert ClaudeReader(home, now=lambda: NOW).subagent_token_total().total_tokens == 1_415
+    assert live.tokens_per_sec is None
+
+
+def test_non_running_claude_rate_is_exactly_zero(tmp_path, monkeypatch):
+    home = _build_home(tmp_path)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home))
+    sessions = _by_id(ClaudeReader(home, now=lambda: NOW).read_sessions())
+    assert sessions["sess-dead"].tokens_per_sec == 0.0
+    assert sessions["sess-recent"].tokens_per_sec == 0.0
+
+
+def test_unknown_claude_state_does_not_claim_a_zero_rate(tmp_path, monkeypatch):
+    home = _build_home(tmp_path)
+    _write_session_file(
+        home,
+        os.getpid(),
+        "sess-live",
+        "/work/live",
+        "future-status",
+        "live one",
+        _real_proc_start(),
+        NOW - 10,
+    )
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home))
+    live = _by_id(ClaudeReader(home, now=lambda: NOW).read_sessions())["sess-live"]
+    assert live.state is SessionState.UNKNOWN
+    assert live.tokens_per_sec is None
 
 
 def test_last_activity_tracks_the_most_recent_signal(tmp_path, monkeypatch):

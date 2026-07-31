@@ -222,14 +222,96 @@ def test_only_the_last_cumulative_token_count_is_used(tmp_path, monkeypatch):
     assert usage.total_tokens != 1_800
 
 
-def test_tokens_per_sec_from_successive_token_count_records(tmp_path, monkeypatch):
+def test_rate_uses_only_output_tokens_over_the_observed_interval(tmp_path, monkeypatch):
     home = _build_home(tmp_path)
     monkeypatch.setenv("CODEX_HOME", str(home))
     running = _by_id(CodexReader(home, now=lambda: NOW).read_sessions())["codex-run"]
-    # 620 cumulative at NOW-40, 1,180 at NOW-20: the 560 between them, spread
-    # over the 40 s since the first count rather than only the 20 s separating
-    # the two. The records are cumulative, so 620 + 1,180 is never the numerator.
-    assert running.tokens_per_sec == pytest.approx(560.0 / 40.0)
+    # Output rises by 60 over the 20 seconds between the snapshots. The much
+    # larger input/cache movement is billing data, not generated tokens.
+    assert running.tokens_per_sec == pytest.approx(60.0 / 20.0)
+
+
+def test_rate_sorts_valid_samples_and_ignores_a_bad_timestamp(tmp_path, monkeypatch):
+    home = tmp_path / "codex_home_bad_rate"
+    path = _write_rollout(
+        home,
+        "2026/07/28",
+        "2026-07-28T12-00-00-rate",
+        [
+            _meta(NOW - 100, "codex-rate", "/work/rate"),
+            _event(NOW - 90, "task_started"),
+            _token_count(NOW - 10, {"input_tokens": 0, "output_tokens": 70}),
+            {
+                "timestamp": "not-a-timestamp",
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "total_token_usage": {
+                            "input_tokens": 50_000,
+                            "output_tokens": 50,
+                        }
+                    },
+                },
+            },
+            _token_count(NOW - 30, {"input_tokens": 0, "output_tokens": 10}),
+        ],
+    )
+    os.utime(path, (NOW - 5, NOW - 5))
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    session = CodexReader(home, now=lambda: NOW).read_sessions()[0]
+    assert session.tokens_per_sec == pytest.approx(60.0 / 20.0)
+
+
+def test_running_rate_is_unknown_without_two_valid_output_samples(
+    tmp_path, monkeypatch
+):
+    home = tmp_path / "codex_home_one_rate_sample"
+    path = _write_rollout(
+        home,
+        "2026/07/28",
+        "2026-07-28T12-30-00-rate",
+        [
+            _meta(NOW - 100, "codex-one", "/work/one"),
+            _event(NOW - 90, "task_started"),
+            _token_count(NOW - 10, {"input_tokens": 0, "output_tokens": 70}),
+        ],
+    )
+    os.utime(path, (NOW - 5, NOW - 5))
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    session = CodexReader(home, now=lambda: NOW).read_sessions()[0]
+    assert session.tokens_per_sec is None
+
+
+def test_rate_never_crosses_a_human_gap_between_turns(tmp_path, monkeypatch):
+    home = tmp_path / "codex_home_new_turn"
+    path = _write_rollout(
+        home,
+        "2026/07/28",
+        "2026-07-28T13-00-00-rate",
+        [
+            _meta(NOW - 1_000, "codex-new-turn", "/work/new-turn"),
+            _event(NOW - 900, "task_started"),
+            _token_count(NOW - 850, {"input_tokens": 0, "output_tokens": 10}),
+            _token_count(NOW - 840, {"input_tokens": 0, "output_tokens": 70}),
+            _event(NOW - 830, "task_complete"),
+            _event(NOW - 20, "user_message", message="continue"),
+            _event(NOW - 10, "task_started"),
+        ],
+    )
+    os.utime(path, (NOW - 5, NOW - 5))
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    session = CodexReader(home, now=lambda: NOW).read_sessions()[0]
+    assert session.state is SessionState.RUNNING
+    assert session.tokens_per_sec is None
+
+
+def test_non_running_codex_rate_is_exactly_zero(tmp_path, monkeypatch):
+    home = _build_home(tmp_path)
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    sessions = _by_id(CodexReader(home, now=lambda: NOW).read_sessions())
+    assert sessions["codex-abort"].tokens_per_sec == 0.0
+    assert sessions["codex-done"].tokens_per_sec == 0.0
 
 
 def test_last_activity_is_the_rollout_mtime(tmp_path, monkeypatch):

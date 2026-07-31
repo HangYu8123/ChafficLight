@@ -94,6 +94,13 @@ def pyinstaller_args(build: Build, platform: str, dist: Path, work: Path) -> lis
         # The entry script lives outside the package, so the import root is explicit.
         "--paths",
         str(ROOT),
+        # `PIL._typing` imports `numpy.typing` under `if TYPE_CHECKING`, and the module
+        # graph reads the bytecode of that branch rather than executing it, so numpy is
+        # bundled whenever it happens to be installed in the build environment — with
+        # OpenBLAS and libgfortran behind it, 73 MB that doubled the Linux archive. No
+        # code here passes an array to Pillow, so nothing imports numpy at run time.
+        "--exclude-module",
+        "numpy",
     ]
     if build.onefile:
         args.append("--onefile")
